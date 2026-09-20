@@ -4,7 +4,7 @@ const puppeteer = require('puppeteer-core');
 const fs = require('fs');
 const path = require('path');
 
-const WORKER_VERSION = 'ha-0.1.0';
+const WORKER_VERSION = 'ha-0.1.1';
 const SOURCE_EXTENSION_VERSION = '0.3.103';
 const READER_VERSION = 'v14.1-worker+settle5s';
 const CHROME_BIN = process.env.CHROME_BIN || '/usr/bin/chromium-browser';
@@ -44,6 +44,43 @@ function redactUrl(raw) {
   } catch (_) {
     return '';
   }
+}
+
+function bookingTargetUrl(raw) {
+  const u = new URL(String(raw || ''));
+  // El worker HA parte de un perfil Chromium nuevo, sin las preferencias
+  // de moneda que sí tiene el Chrome de escritorio. Fijamos EUR para que
+  // el Reader v14 reciba exactamente el mismo formato comercial.
+  u.searchParams.set('selected_currency', 'EUR');
+  return u.toString();
+}
+
+function hasComparablePrice(payload) {
+  const meta = (payload && payload.meta) || {};
+  const vals = [
+    meta.comparison_total,
+    meta.recommended_total,
+    meta.booking_recommended_total,
+    meta.lowest_visible_total,
+  ];
+  if (vals.some((v) => v !== '' && v !== null && v !== undefined && Number.isFinite(Number(v)) && Number(v) > 0)) return true;
+  const offers = Array.isArray(payload && payload.offers) ? payload.offers : [];
+  return offers.some((o) => o && o.unit_price !== '' && o.unit_price !== null && Number.isFinite(Number(o.unit_price)) && Number(o.unit_price) > 0);
+}
+
+function payloadSummary(payload) {
+  const meta = (payload && payload.meta) || {};
+  const offers = Array.isArray(payload && payload.offers) ? payload.offers : [];
+  const inventory = Array.isArray(payload && payload.inventory_summary) ? payload.inventory_summary : [];
+  const priced = offers.filter((o) => o && o.unit_price !== '' && o.unit_price !== null && Number.isFinite(Number(o.unit_price)) && Number(o.unit_price) > 0).length;
+  return {
+    inventory: inventory.length,
+    offers: offers.length,
+    priced_offers: priced,
+    comparison_total: meta.comparison_total ?? '',
+    recommended_total: meta.recommended_total ?? '',
+    lowest_visible_total: meta.lowest_visible_total ?? '',
+  };
 }
 
 const CONFIG = {
@@ -186,13 +223,14 @@ async function waitForStableContext(page, ctx, timeoutMs = 22000) {
 }
 
 async function navigateForJob(page, job, ctx) {
-  await page.goto(job.url, { waitUntil: 'domcontentloaded', timeout: CONFIG.navigationTimeoutMs });
+  const targetUrl = bookingTargetUrl(job.url);
+  await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: CONFIG.navigationTimeoutMs });
   await injectReader(page);
   let ok = await waitForStableContext(page, ctx, 22000);
   if (!ok) {
     debug('context not stable after first navigation; retrying clean goto', redactUrl(job.url));
     await page.goto('about:blank', { waitUntil: 'load', timeout: 15000 }).catch(() => {});
-    await page.goto(job.url, { waitUntil: 'domcontentloaded', timeout: CONFIG.navigationTimeoutMs });
+    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: CONFIG.navigationTimeoutMs });
     await injectReader(page);
     ok = await waitForStableContext(page, ctx, 22000);
   }
@@ -335,6 +373,34 @@ async function processJob(browser, claim) {
     let result;
     try {
       result = await runReader(page, ctx);
+
+      // En Home Assistant Chromium puede pintar selectores/stock antes que los
+      // precios. Para trabajos PRICE no aceptamos la primera lectura vacía:
+      // reintentamos sobre el mismo DOM ya estabilizado antes de clasificarla.
+      if (String(job.run_kind || '').toLowerCase() === 'price') {
+        for (let priceTry = 1; priceTry <= 3; priceTry++) {
+          const payloadNow = (result && result.payload) || {};
+          if (hasComparablePrice(payloadNow)) break;
+          if (result && result.envelope && !['OK', 'PARCIAL'].includes(String(result.envelope.status || ''))) break;
+
+          debug(`[job ${job.id}] precio aún no resuelto · relectura ${priceTry}/3`, payloadSummary(payloadNow));
+          await heartbeat(job.id);
+          await sleep(5000);
+
+          const matchAfterDelay = await pageContext(page, ctx).catch(() => null);
+          if (!matchAfterDelay || !matchAfterDelay.ok) break;
+          result = await runReader(page, ctx);
+        }
+
+        const finalPayload = (result && result.payload) || {};
+        if (result && result.envelope && result.envelope.status === 'OK' && !hasComparablePrice(finalPayload)) {
+          result.envelope.status = 'PARCIAL';
+          result.envelope.status_reason = 'price_not_resolved_after_retries';
+          const missing = Array.isArray(result.envelope.fields_missing) ? result.envelope.fields_missing : [];
+          if (!missing.includes('meta.comparison_total')) missing.push('meta.comparison_total');
+          result.envelope.fields_missing = missing;
+        }
+      }
     } catch (error) {
       const env = {
         schema: 'bulin360.booking.reader-envelope.v1', reader_version: READER_VERSION, worker_version: WORKER_VERSION,
@@ -344,6 +410,10 @@ async function processJob(browser, claim) {
         duration_ms: Date.now() - started, captured_at: nowIso(), payload: {},
       };
       result = { envelope: env, payload: {} };
+    }
+
+    if (result && result.payload) {
+      debug(`[job ${job.id}] resumen lector`, payloadSummary(result.payload));
     }
 
     if (result && result.retry && result.reason === 'context_mismatch') {
