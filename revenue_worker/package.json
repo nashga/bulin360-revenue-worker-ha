@@ -1,0 +1,11 @@
+{
+  "name": "bulin360-revenue-worker-ha",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Bulin360 Revenue Worker for Home Assistant",
+  "main": "worker.js",
+  "type": "commonjs",
+  "dependencies": {
+    "puppeteer-core": "^24.16.0"
+  }
+}
