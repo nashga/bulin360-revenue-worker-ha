@@ -1,5 +1,5 @@
 name: Bulin360 Revenue Worker
-version: "0.1.0"
+version: "0.1.1"
 slug: bulin360_revenue_worker
 description: Worker distribuido de Revenue para Bulin360
 url: https://github.com/nashga/bulin360-revenue-worker-ha
