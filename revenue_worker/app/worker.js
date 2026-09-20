@@ -4,7 +4,7 @@ const puppeteer = require('puppeteer-core');
 const fs = require('fs');
 const path = require('path');
 
-const WORKER_VERSION = 'ha-0.1.1';
+const WORKER_VERSION = 'ha-0.1.2';
 const SOURCE_EXTENSION_VERSION = '0.3.103';
 const READER_VERSION = 'v14.1-worker+settle5s';
 const CHROME_BIN = process.env.CHROME_BIN || '/usr/bin/chromium-browser';
@@ -81,6 +81,30 @@ function payloadSummary(payload) {
     recommended_total: meta.recommended_total ?? '',
     lowest_visible_total: meta.lowest_visible_total ?? '',
   };
+}
+
+async function pageDiagnostics(page) {
+  try {
+    return await page.evaluate(() => {
+      const text = String(document.body?.innerText || '').replace(/\s+/g, ' ').trim();
+      const html = String(document.documentElement?.innerHTML || '');
+      const priceMatches = text.match(/(?:€\s*[0-9]|[0-9][0-9.,\s]*\s*€)/g) || [];
+      return {
+        title: document.title || '',
+        url: location.href,
+        body_chars: text.length,
+        html_chars: html.length,
+        selects: document.querySelectorAll('select').length,
+        rows: document.querySelectorAll('tr').length,
+        tables: document.querySelectorAll('table').length,
+        hotel_blocks: document.querySelectorAll('[data-block-id],[data-testid*="room"],[data-testid*="property"]').length,
+        euro_tokens: priceMatches.length,
+        text_head: text.slice(0, 700),
+      };
+    });
+  } catch (error) {
+    return { error: String(error && error.message || error) };
+  }
 }
 
 const CONFIG = {
@@ -354,7 +378,21 @@ async function processJob(browser, claim) {
   const hb = setInterval(() => heartbeat(job.id), Math.max(30000, Math.floor(CONFIG.leaseSeconds * 500)));
   try {
     await page.setViewport({ width: 1365, height: 900 });
-    await page.setExtraHTTPHeaders({ 'Accept-Language': `${CONFIG.locale},es;q=0.9,en;q=0.7` });
+    await page.setUserAgent('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36');
+    await page.setExtraHTTPHeaders({
+      'Accept-Language': `${CONFIG.locale},es;q=0.9,en;q=0.7`,
+      'Sec-CH-UA': '"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"',
+      'Sec-CH-UA-Mobile': '?0',
+      'Sec-CH-UA-Platform': '"Linux"',
+    });
+    await page.evaluateOnNewDocument(() => {
+      try {
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        Object.defineProperty(navigator, 'languages', { get: () => ['es-ES', 'es', 'en'] });
+        Object.defineProperty(navigator, 'platform', { get: () => 'Linux x86_64' });
+        Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+      } catch (_) {}
+    });
     page.setDefaultNavigationTimeout(CONFIG.navigationTimeoutMs);
     page.setDefaultTimeout(Math.max(CONFIG.readerDeadlineMs, 30000));
 
@@ -384,6 +422,9 @@ async function processJob(browser, claim) {
           if (result && result.envelope && !['OK', 'PARCIAL'].includes(String(result.envelope.status || ''))) break;
 
           debug(`[job ${job.id}] precio aún no resuelto · relectura ${priceTry}/3`, payloadSummary(payloadNow));
+          if (priceTry === 1) {
+            debug(`[job ${job.id}] diagnóstico Booking`, await pageDiagnostics(page));
+          }
           await heartbeat(job.id);
           await sleep(5000);
 
@@ -443,6 +484,7 @@ async function launchBrowser() {
     '--no-default-browser-check',
     '--disable-background-networking',
     '--disable-component-update',
+    '--window-size=1365,900',
     `--lang=${CONFIG.locale}`,
   ];
   return puppeteer.launch({
