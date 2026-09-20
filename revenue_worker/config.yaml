@@ -1,0 +1,35 @@
+name: Bulin360 Revenue Worker
+version: "0.1.0"
+slug: bulin360_revenue_worker
+description: Worker distribuido de Revenue para Bulin360
+url: https://github.com/nashga/bulin360-revenue-worker-ha
+startup: services
+boot: auto
+init: false
+arch:
+  - aarch64
+  - amd64
+options:
+  enabled: true
+  backend_base: ""
+  worker_token: ""
+  headless: true
+  lease_seconds: 120
+  claim_retry_seconds: 5
+  navigation_timeout_seconds: 60
+  reader_deadline_seconds: 18
+  locale: es-ES
+  timezone: Europe/Madrid
+  debug: false
+schema:
+  enabled: bool
+  backend_base: str
+  worker_token: password
+  headless: bool
+  lease_seconds: int(60,600)
+  claim_retry_seconds: int(2,30)
+  navigation_timeout_seconds: int(20,180)
+  reader_deadline_seconds: int(10,60)
+  locale: str
+  timezone: str
+  debug: bool
