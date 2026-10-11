@@ -12,6 +12,8 @@ export B360_READER_DEADLINE_SECONDS="$(bashio::config 'reader_deadline_seconds')
 export B360_LOCALE="$(bashio::config 'locale')"
 export B360_TIMEZONE="$(bashio::config 'timezone')"
 export B360_DEBUG="$(bashio::config 'debug')"
+export B360_CHANNELS="$(bashio::config 'channels')"
+export B360_CHANNELS_DIRECT="$(bashio::config 'channels_direct')"
 
 mkdir -p /data/chromium
 

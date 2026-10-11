@@ -4,8 +4,8 @@ const puppeteer = require('puppeteer-core');
 const fs = require('fs');
 const path = require('path');
 
-const WORKER_VERSION = 'ha-0.2.0';
-const SOURCE_EXTENSION_VERSION = '0.4.1';
+const WORKER_VERSION = 'ha-0.3.0';
+const SOURCE_EXTENSION_VERSION = '0.5.0';
 const READER_VERSION = 'v14.1-worker+settle5s';
 const CHROME_BIN = process.env.CHROME_BIN || '/usr/bin/chromium-browser';
 
@@ -119,6 +119,8 @@ const CONFIG = {
   locale: String(process.env.B360_LOCALE || 'es-ES'),
   timezone: String(process.env.B360_TIMEZONE || 'Europe/Madrid'),
   debug: envBool('B360_DEBUG', false),
+  channels: envBool('B360_CHANNELS', true),
+  channelsDirect: envBool('B360_CHANNELS_DIRECT', true),
 };
 
 function isAllowedBookingUrl(raw) {
@@ -195,6 +197,9 @@ const SCRIPT_DIR = __dirname;
 const coreSource = fs.readFileSync(path.join(SCRIPT_DIR, 'booking-reader-core.js'), 'utf8');
 const workerSource = fs.readFileSync(path.join(SCRIPT_DIR, 'booking-reader-worker.js'), 'utf8');
 const readerSource = fs.readFileSync(path.join(SCRIPT_DIR, 'reader-v14.js'), 'utf8');
+// Lector de canales compartido con la extensión 0.5.0 (Airbnb, VRBO, Amenitiz, Avirato y sonda de motor).
+const channelSource = fs.readFileSync(path.join(SCRIPT_DIR, 'channel-reader-core.js'), 'utf8');
+const ChannelReader = require('./channel-reader-core.js');
 
 async function injectReader(page) {
   await page.addScriptTag({ content: coreSource });
@@ -459,6 +464,39 @@ async function processJob(browser, claim) {
   }
 }
 
+async function preparePage(page) {
+  await page.setViewport({ width: 1365, height: 900 });
+  await page.setUserAgent('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36');
+  await page.setExtraHTTPHeaders({ 'Accept-Language': `${CONFIG.locale},es;q=0.9,en;q=0.7` });
+  await page.evaluateOnNewDocument(() => { try { Object.defineProperty(navigator, 'webdriver', { get: () => undefined }); } catch (_) {} });
+  page.setDefaultNavigationTimeout(CONFIG.navigationTimeoutMs);
+  page.setDefaultTimeout(60000);
+}
+
+/** Trabajo de canal (M18): abre la URL del trabajo, inyecta el lector de canales y envía el resultado con job_kind channel.
+ *  Un CAPTCHA en un canal no pausa el worker: el Panel enfría ese canal y el worker sigue con Booking y el resto. */
+async function processChannelJob(browser, claim) {
+  const job = claim.job; const attemptId = claim.attempt_id; const started = Date.now();
+  log(`[canal ${job.id}]`, job.channel, job.engine || '', job.run_kind, job.competitor_name || '', job.checkin || job.range_from || '', '->', job.checkout || job.range_to || '');
+  const hb = setInterval(() => api('heartbeat', { job_id: Number(job.id), job_kind: 'channel', lease_seconds: CONFIG.leaseSeconds, ext_version: WORKER_VERSION, reader_version: ChannelReader.READER_VERSION }).catch(() => {}), Math.max(30000, Math.floor(CONFIG.leaseSeconds * 500)));
+  const page = await browser.newPage(); let res;
+  try {
+    if (!/^https:\/\//i.test(String(job.url || ''))) res = { status: 'ERROR', reason: 'invalid_job_url' };
+    else {
+      await preparePage(page);
+      await page.goto(job.url, { waitUntil: 'domcontentloaded', timeout: CONFIG.navigationTimeoutMs });
+      await sleep(2500);
+      const tag = await page.addScriptTag({ content: channelSource });
+      await tag.evaluate((el) => el.remove()).catch(() => {}); // el lector queda cargado pero fuera del DOM (la sonda analiza el HTML de la web)
+      res = await page.evaluate((j) => globalThis.BulinChannelReader.run(j), job);
+    }
+  } catch (error) { res = { status: 'ERROR', reason: 'channel_exception', error_detail: String(error && error.message || error).slice(0, 300) }; }
+  finally { clearInterval(hb); await page.close().catch(() => {}); }
+  const out = await api('result', Object.assign({}, res, { job_kind: 'channel', job_id: job.id, attempt_id: attemptId, ext_version: WORKER_VERSION, reader_version: ChannelReader.READER_VERSION, duration_ms: res.duration_ms || (Date.now() - started) }));
+  log(`[canal ${job.id}] ${res.status}${out.channel_cooldown_until ? ' · canal en pausa hasta ' + out.channel_cooldown_until : ''}`);
+  return { paused: false };
+}
+
 async function launchBrowser() {
   const args = [
     '--no-sandbox',
@@ -482,7 +520,7 @@ async function launchBrowser() {
 }
 
 async function main() {
-  log(`Bulin360 Revenue Worker ${WORKER_VERSION} (source Chrome ${SOURCE_EXTENSION_VERSION}, reader ${READER_VERSION})`);
+  log(`Bulin360 Revenue Worker ${WORKER_VERSION} (source Chrome ${SOURCE_EXTENSION_VERSION}, reader ${READER_VERSION}, canales ${CONFIG.channels ? ChannelReader.READER_VERSION : 'no'})`);
   if (!CONFIG.enabled) {
     log('Worker desactivado por configuración.');
     while (true) await sleep(60000);
@@ -500,6 +538,7 @@ async function main() {
         lease_seconds: CONFIG.leaseSeconds,
         ext_version: WORKER_VERSION,
         reader_version: READER_VERSION,
+        ...(CONFIG.channels ? { capabilities: ChannelReader.capabilities({ direct: CONFIG.channelsDirect }) } : {}),
       });
       if (claim.action === 'idle') {
         const retry = Math.max(2, Math.min(30, Number(claim.retry_after_seconds || CONFIG.claimRetrySeconds)));
@@ -508,7 +547,7 @@ async function main() {
         continue;
       }
       if (claim.action !== 'job' || !claim.job) throw new Error('Respuesta claim no válida');
-      const result = await processJob(browser, claim);
+      const result = claim.kind === 'channel' || claim.job.kind === 'channel' ? await processChannelJob(browser, claim) : await processJob(browser, claim);
       if (result.paused) {
         log('Barrido pausado por CAPTCHA/BLOQUEADO. Esperando antes de volver a consultar la cola.');
         await sleep(30000);

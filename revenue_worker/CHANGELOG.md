@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.0
+
+- **Canales (Panel Admin ≥ 0.29.0, M18):** además de Booking lee Airbnb (calendario de 12 meses por la API de la propia página y precio de la estancia),
+  VRBO (calendario del selector de fechas y precio con tasas), Amenitiz (calendario y precio por su API pública) y Avirato (precio por estancia),
+  y hace la «sonda» que detecta el motor de reservas de la web de un competidor. Lector compartido con la extensión 0.5.0: `channel-reader-core.js` (ch1.0.0).
+- Solo recibe trabajos de canal porque los anuncia en `claim.capabilities`; con el Panel antiguo todo sigue igual (solo Booking).
+- Un CAPTCHA en Airbnb o VRBO no pausa el worker: el Panel enfría ese canal 30 min y el worker sigue con Booking y el resto.
+- Opciones nuevas: `channels` (activar canales) y `channels_direct` (webs de motores directos y sonda).
+
 ## 0.2.0
 
 - Core del lector **compartido** con el Panel Admin y la extensión Chrome 0.4.1 (`booking-reader-core.js` 1.2.0, copia idéntica de `assets/shared` del Panel).
