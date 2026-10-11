@@ -1,5 +1,5 @@
 /*
- * Bulín 360 · lector de canales (Airbnb, VRBO y motores directos) · core compartido 1.0.1 (VRBO: detecta ids que no son suyos).
+ * Bulín 360 · lector de canales (Airbnb, VRBO y motores directos) · core compartido 1.0.2 (Airbnb: sin bloque de reserva confirma con el calendario si la estancia no está disponible).
  * ÚNICA fuente: la extensión Revenue Worker lo inyecta en la pestaña y el worker de Home Assistant lo carga con addScriptTag.
  * Protocolo: bulin360.channel.reader-envelope.v1 (ver api/revenue/_channels.php). run(job) devuelve el cuerpo del resultado:
  *   {status, reason, listing:{external_id}, calendar:[{date,available,checkin,checkout,min_nights,price}], price:{checkin,checkout,guests,total,
@@ -20,8 +20,8 @@
   else root.BulinChannelReader = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
-  const VERSION = '1.0.1';
-  const READER_VERSION = 'ch1.0.1';
+  const VERSION = '1.0.2';
+  const READER_VERSION = 'ch1.0.2';
   const AIRBNB_KEY = 'd306zoyjsyarp7ifhu67rjxn52tv0t20'; // clave pública de la web de Airbnb (también se lee de la página)
   const AIRBNB_CAL_HASH = 'bfd57b0552df2e8870f68d5cf501868a0e08417267469f55faefa78aca0234f4'; // respaldo si la página aún no lo ha pedido
   const ENGINES = {
@@ -74,7 +74,7 @@
   /** Texto del bloque de reserva de Airbnb → total / no disponible / estancia mínima. */
   function parseAirbnbBookIt(text) {
     const t = s(text);
-    if (/fechas no disponibles|no est[aá] disponible|those dates are(?:n['’]t| not) available|dates? (?:are )?unavailable/i.test(t)) return { unavailable: true };
+    if (/fechas no disponibles|no est[aá] disponible|no hay [a-zñáéíóú ]{0,40}disponibles|ya no (?:est[aá]|quedan) .{0,30}disponib|those dates are(?:n['’]t| not) available|dates? (?:are )?unavailable|no [a-z ]{0,30}available for (?:these|those) dates|sold out/i.test(t)) return { unavailable: true };
     const mn = t.match(/estancia m[ií]nima (?:es )?de (\d+)|minimum stay (?:is )?(\d+)/i); if (mn) return { restriction: true, min_nights: Number(mn[1] || mn[2]) };
     const tot = totalsInText(t); if (tot.length) return { total: tot[0] };
     return {};
@@ -159,26 +159,41 @@
   function clampDays(days, job) { return days.filter((d) => (!job.range_from || d.date >= job.range_from) && (!job.range_to || d.date <= job.range_to)); }
   function qp(env) { try { return new URL(env.loc.href).searchParams; } catch (e) { return new URLSearchParams(); } }
 
-  async function airbnbCalendar(job, env) {
-    const id = String(job.external_id || ''); if (!/^\d+$/.test(id)) return result('ERROR', { reason: 'missing_external_id' });
-    const pathId = (String(env.loc.pathname || '').match(/\/rooms\/(?:plus\/)?(\d+)/) || [])[1]; if (pathId && pathId !== id) return result('INCONSISTENTE', { reason: 'property_mismatch', listing: { external_id: pathId } });
+  /** Días del calendario de Airbnb (API de la propia página) entre from y to. Devuelve { days } o { error: result(...) }. */
+  async function airbnbCalendarDays(id, env, from, to, waitMs) {
     const key = ((env.doc && env.doc.documentElement ? env.doc.documentElement.innerHTML : '').match(/"api_config":\{"key":"([a-z0-9]+)"/) || [])[1] || AIRBNB_KEY;
-    const seen = await waitFor(env, () => (env.perf ? env.perf.getEntriesByType('resource').map((e) => e.name).find((n) => n.includes('PdpAvailabilityCalendar')) : null), 12000, 600);
+    const seen = await waitFor(env, () => (env.perf ? env.perf.getEntriesByType('resource').map((e) => e.name).find((n) => n.includes('PdpAvailabilityCalendar')) : null), waitMs, 600);
     const base = seen ? new URL(seen) : new URL(env.loc.origin + '/api/v3/PdpAvailabilityCalendarV2Query/' + AIRBNB_CAL_HASH + '?operationName=PdpAvailabilityCalendarV2Query&locale=es&currency=EUR');
     if (!seen) base.searchParams.set('extensions', JSON.stringify({ persistedQuery: { version: 1, sha256Hash: AIRBNB_CAL_HASH } }));
     base.searchParams.set('currency', 'EUR');
-    const from = job.range_from || new Date().toISOString().slice(0, 10); const to = job.range_to || addDays(from, 365); let days = []; let cursor = from.slice(0, 7);
+    let days = []; let cursor = from.slice(0, 7);
     for (let i = 0; i < 3 && cursor <= to.slice(0, 7); i++) {
       const [y, m] = cursor.split('-').map(Number);
       base.searchParams.set('variables', JSON.stringify({ listingId: airbnbGlobalId(id), input: { count: 12, month: m, year: y, returnPropertyLevelCalendarIfApplicable: false } }));
       const r = await env.fetch(base.toString(), { headers: { 'X-Airbnb-API-Key': key, Accept: 'application/json' }, credentials: 'include' });
-      if (r.status === 429 || r.status === 403) return result('BLOQUEADO', { reason: 'airbnb_http_' + r.status });
+      if (r.status === 429 || r.status === 403) return { error: result('BLOQUEADO', { reason: 'airbnb_http_' + r.status }) };
       let j = null; try { j = await r.json(); } catch (e) { j = null; }
-      const part = parseAirbnbCalendar(j); if (!part) return result('ESTRUCTURA_CAMBIADA', { reason: 'airbnb_calendar_shape', error_detail: 'HTTP ' + r.status });
+      const part = parseAirbnbCalendar(j); if (!part) return { error: result('ESTRUCTURA_CAMBIADA', { reason: 'airbnb_calendar_shape', error_detail: 'HTTP ' + r.status }) };
       days = days.concat(part); const nm = new Date(Date.UTC(y, m - 1 + 12, 1)); cursor = nm.toISOString().slice(0, 7);
     }
-    days = [...new Map(days.map((d) => [d.date, d])).values()].sort((a, b) => (a.date < b.date ? -1 : 1));
-    return result('OK', { listing: { external_id: id }, calendar: clampDays(days, job), currency: 'EUR', final_url: env.loc.href });
+    return { days: [...new Map(days.map((d) => [d.date, d])).values()].sort((a, b) => (a.date < b.date ? -1 : 1)) };
+  }
+  /** ¿Se puede reservar la estancia según el calendario? null si el calendario no lo deja claro. */
+  function airbnbStayFromCalendar(days, checkin, checkout) {
+    const by = new Map(days.map((d) => [d.date, d])); const nights = []; for (let d = checkin; d < checkout; d = addDays(d, 1)) nights.push(d);
+    if (!nights.length || nights.some((d) => !by.has(d))) return null;
+    if (nights.some((d) => !by.get(d).available)) return { unavailable: true, reason: 'calendar_night_unavailable' };
+    const first = by.get(checkin); if (first.checkin === false) return { unavailable: true, reason: 'calendar_no_checkin' };
+    const out = by.get(checkout); if (out && out.checkout === false) return { unavailable: true, reason: 'calendar_no_checkout' };
+    if (first.min_nights && first.min_nights > nights.length) return { restriction: true, min_nights: first.min_nights };
+    return null;
+  }
+  async function airbnbCalendar(job, env) {
+    const id = String(job.external_id || ''); if (!/^\d+$/.test(id)) return result('ERROR', { reason: 'missing_external_id' });
+    const pathId = (String(env.loc.pathname || '').match(/\/rooms\/(?:plus\/)?(\d+)/) || [])[1]; if (pathId && pathId !== id) return result('INCONSISTENTE', { reason: 'property_mismatch', listing: { external_id: pathId } });
+    const from = job.range_from || new Date().toISOString().slice(0, 10); const to = job.range_to || addDays(from, 365);
+    const c = await airbnbCalendarDays(id, env, from, to, 12000); if (c.error) return c.error;
+    return result('OK', { listing: { external_id: id }, calendar: clampDays(c.days, job), currency: 'EUR', final_url: env.loc.href });
   }
   async function airbnbPrice(job, env) {
     const p = qp(env); const pathId = (String(env.loc.pathname || '').match(/\/rooms\/(?:plus\/)?(\d+)/) || [])[1];
@@ -190,7 +205,16 @@
       const r = parseAirbnbBookIt(txt || bodyText(env).slice(0, 0)); return r.total || r.unavailable || r.restriction ? r : (/fechas no disponibles|those dates are not available/i.test(bodyText(env)) ? { unavailable: true } : null);
     }, 20000, 700);
     const base = { listing: { external_id: pathId || job.external_id }, final_url: env.loc.href };
-    if (!read) return result('ESTRUCTURA_CAMBIADA', Object.assign(base, { reason: 'airbnb_bookit_not_found' }));
+    if (!read) {
+      // Sin bloque de reserva: Airbnb lo oculta cuando las fechas no se pueden reservar. El calendario de la propia página lo confirma.
+      const id = String(pathId || job.external_id || ''); const c = /^\d+$/.test(id) ? await airbnbCalendarDays(id, env, job.checkin, job.checkout, 1500) : null;
+      const st = c && c.days ? airbnbStayFromCalendar(c.days, job.checkin, job.checkout) : null;
+      if (st && st.unavailable) return result('SIN_DISPONIBILIDAD', Object.assign(base, { reason: st.reason, price: { checkin: job.checkin, checkout: job.checkout, guests: job.guests } }));
+      if (st && st.restriction) return result('RESTRICCION', Object.assign(base, { reason: 'min_nights', price: { checkin: job.checkin, checkout: job.checkout, guests: job.guests, min_nights: st.min_nights } }));
+      const cap = bodyText(env).match(/m[aá]ximo de (\d+) (?:hu[eé]spedes|personas|viajeros)|maximum of (\d+) guests/i);
+      if (cap && Number(cap[1] || cap[2]) < Number(job.guests)) return result('RESTRICCION', Object.assign(base, { reason: 'max_guests', error_detail: 'máximo ' + (cap[1] || cap[2]) + ' huéspedes', price: { checkin: job.checkin, checkout: job.checkout, guests: job.guests } }));
+      return result('ESTRUCTURA_CAMBIADA', Object.assign(base, { reason: 'airbnb_bookit_not_found' }));
+    }
     if (read.unavailable) return result('SIN_DISPONIBILIDAD', Object.assign(base, { reason: 'dates_not_available', price: { checkin: job.checkin, checkout: job.checkout, guests: job.guests } }));
     if (read.restriction) return result('RESTRICCION', Object.assign(base, { reason: 'min_nights', price: { checkin: job.checkin, checkout: job.checkout, guests: job.guests, min_nights: read.min_nights } }));
     return result('OK', Object.assign(base, { price: { checkin: job.checkin, checkout: job.checkout, guests: job.guests, total: read.total, currency: 'EUR' } }));
@@ -281,5 +305,5 @@
   function capabilities(opts) { const o = opts || {}; return { channels: o.direct === false ? ['airbnb', 'vrbo'] : ['airbnb', 'vrbo', 'direct'], direct_engines: SUPPORTED_DIRECT.slice(), channel_reader: VERSION }; }
 
   return { VERSION, READER_VERSION, SUPPORTED_DIRECT, run, capabilities, parseEuroAmount, totalsInText, classifyBlock, airbnbGlobalId, parseAirbnbCalendar, parseAirbnbBookIt, parseDayLabel, vrboDayState,
-    parseVrboPriceSummary, parseAmenitizAvailability, parseAmenitizRooms, parseAviratoText, detectEngine, bookingLinks, _internal: { airbnbCalendar, airbnbPrice, vrboPrice, amenitizCalendar, amenitizPrice, aviratoPrice, probe, addDays } };
+    parseVrboPriceSummary, parseAmenitizAvailability, parseAmenitizRooms, parseAviratoText, detectEngine, bookingLinks, _internal: { airbnbCalendar, airbnbPrice, airbnbStayFromCalendar, vrboPrice, amenitizCalendar, amenitizPrice, aviratoPrice, probe, addDays } };
 });

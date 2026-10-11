@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.2
+
+- Lector de canales ch1.0.2 (igual que la extensión 0.5.2): en Airbnb, «No hay apartamentos disponibles para estas fechas» (anuncios con varias
+  unidades) cuenta como sin disponibilidad en vez de «estructura cambiada»; si falta el bloque de reserva, decide el calendario de la propia página
+  (noche ocupada, sin entrada/salida o estancia mínima).
+
 ## 0.3.1
 
 - Lector de canales ch1.0.1 (mismo que la extensión 0.5.1): VRBO detecta las fichas que no están en VRBO (ids de hoteles de Expedia)
