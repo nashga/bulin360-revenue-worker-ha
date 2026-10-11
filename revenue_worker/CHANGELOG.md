@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.1
+
+- Lector de canales ch1.0.1 (mismo que la extensión 0.5.1): VRBO detecta las fichas que no están en VRBO (ids de hoteles de Expedia)
+  y responde «estructura cambiada · listing_not_on_vrbo» en vez de darlas por cerradas. MisterPlan también por reservaonline.support y mrplan.io.
+
 ## 0.3.0
 
 - **Canales (Panel Admin ≥ 0.29.0, M18):** además de Booking lee Airbnb (calendario de 12 meses por la API de la propia página y precio de la estancia),

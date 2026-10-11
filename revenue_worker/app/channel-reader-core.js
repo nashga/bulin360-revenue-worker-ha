@@ -1,5 +1,5 @@
 /*
- * Bulín 360 · lector de canales (Airbnb, VRBO y motores directos) · core compartido 1.0.0.
+ * Bulín 360 · lector de canales (Airbnb, VRBO y motores directos) · core compartido 1.0.1 (VRBO: detecta ids que no son suyos).
  * ÚNICA fuente: la extensión Revenue Worker lo inyecta en la pestaña y el worker de Home Assistant lo carga con addScriptTag.
  * Protocolo: bulin360.channel.reader-envelope.v1 (ver api/revenue/_channels.php). run(job) devuelve el cuerpo del resultado:
  *   {status, reason, listing:{external_id}, calendar:[{date,available,checkin,checkout,min_nights,price}], price:{checkin,checkout,guests,total,
@@ -20,8 +20,8 @@
   else root.BulinChannelReader = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
-  const VERSION = '1.0.0';
-  const READER_VERSION = 'ch1.0.0';
+  const VERSION = '1.0.1';
+  const READER_VERSION = 'ch1.0.1';
   const AIRBNB_KEY = 'd306zoyjsyarp7ifhu67rjxn52tv0t20'; // clave pública de la web de Airbnb (también se lee de la página)
   const AIRBNB_CAL_HASH = 'bfd57b0552df2e8870f68d5cf501868a0e08417267469f55faefa78aca0234f4'; // respaldo si la página aún no lo ha pedido
   const ENGINES = {
@@ -196,6 +196,7 @@
     return result('OK', Object.assign(base, { price: { checkin: job.checkin, checkout: job.checkout, guests: job.guests, total: read.total, currency: 'EUR' } }));
   }
   async function vrboCalendar(job, env) {
+    if (vrboNotListed(env)) return result('ESTRUCTURA_CAMBIADA', { reason: 'listing_not_on_vrbo', error_detail: 'VRBO redirige a una búsqueda: este id no es un alquiler de VRBO', final_url: env.loc.href });
     const d = env.doc; const opened = await waitFor(env, () => { if (d.querySelector('.uitk-day-button')) return true; const t = d.querySelector('[data-stid="uitk-date-selector-input1-default"]'); if (t) t.click(); return false; }, 15000, 800);
     if (!opened) return result('ESTRUCTURA_CAMBIADA', { reason: 'vrbo_calendar_not_found', final_url: env.loc.href });
     const to = job.range_to || addDays(new Date().toISOString().slice(0, 10), 365); const map = new Map();
@@ -207,7 +208,10 @@
     if (!map.size) return result('ESTRUCTURA_CAMBIADA', { reason: 'vrbo_days_unreadable', final_url: env.loc.href });
     return result('OK', { listing: { external_id: job.external_id }, calendar: clampDays([...map.values()].sort((a, b) => (a.date < b.date ? -1 : 1)), job), currency: 'EUR', final_url: env.loc.href });
   }
+  /** VRBO redirige a una búsqueda cuando el id (p. ej. un hotel de Expedia /pdp/lo/<id>) no es un alquiler suyo. */
+  function vrboNotListed(env) { return /\/(?:alquiler-vacacional|vacation-rentals|search)(?:\/|\?|$)/.test(String(env.loc.pathname || '')) && !env.doc.querySelector('[data-stid="product-price-summary"], .uitk-day-button'); }
   async function vrboPrice(job, env) {
+    if (vrboNotListed(env)) return result('ESTRUCTURA_CAMBIADA', { reason: 'listing_not_on_vrbo', error_detail: 'VRBO redirige a una búsqueda: este id no es un alquiler de VRBO', final_url: env.loc.href });
     const p = qp(env); const ci = p.get('chkin') || p.get('startDate'); const co = p.get('chkout') || p.get('endDate');
     if (ci !== job.checkin || co !== job.checkout || Number(p.get('adults')) !== Number(job.guests)) return result('INCONSISTENTE', { reason: 'context_mismatch', error_detail: 'url_params' });
     const read = await waitFor(env, () => { const el = env.doc.querySelector('[data-stid="product-price-summary"]'); const r = parseVrboPriceSummary(el ? el.innerText || el.textContent : ''); if (r.total || r.unavailable) return r;
