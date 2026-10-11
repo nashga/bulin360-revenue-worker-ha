@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.3
+
+- Lector de canales ch1.0.3 (igual que la extensión 0.5.3): en VRBO, «Este alojamiento no está disponible en Vrbo para tus fechas» cuenta como
+  sin disponibilidad en vez de «estructura cambiada».
+
 ## 0.3.2
 
 - Lector de canales ch1.0.2 (igual que la extensión 0.5.2): en Airbnb, «No hay apartamentos disponibles para estas fechas» (anuncios con varias

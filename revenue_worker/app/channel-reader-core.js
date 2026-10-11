@@ -1,5 +1,5 @@
 /*
- * Bulín 360 · lector de canales (Airbnb, VRBO y motores directos) · core compartido 1.0.2 (Airbnb: sin bloque de reserva confirma con el calendario si la estancia no está disponible).
+ * Bulín 360 · lector de canales (Airbnb, VRBO y motores directos) · core compartido 1.0.3 (VRBO: «no está disponible en Vrbo para tus fechas»; Airbnb: sin bloque de reserva confirma con el calendario si la estancia no está disponible).
  * ÚNICA fuente: la extensión Revenue Worker lo inyecta en la pestaña y el worker de Home Assistant lo carga con addScriptTag.
  * Protocolo: bulin360.channel.reader-envelope.v1 (ver api/revenue/_channels.php). run(job) devuelve el cuerpo del resultado:
  *   {status, reason, listing:{external_id}, calendar:[{date,available,checkin,checkout,min_nights,price}], price:{checkin,checkout,guests,total,
@@ -20,8 +20,8 @@
   else root.BulinChannelReader = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
-  const VERSION = '1.0.2';
-  const READER_VERSION = 'ch1.0.2';
+  const VERSION = '1.0.3';
+  const READER_VERSION = 'ch1.0.3';
   const AIRBNB_KEY = 'd306zoyjsyarp7ifhu67rjxn52tv0t20'; // clave pública de la web de Airbnb (también se lee de la página)
   const AIRBNB_CAL_HASH = 'bfd57b0552df2e8870f68d5cf501868a0e08417267469f55faefa78aca0234f4'; // respaldo si la página aún no lo ha pedido
   const ENGINES = {
@@ -90,6 +90,10 @@
   function vrboDayState(cls) {
     const m = String(cls || '').match(/uitk-background-((?:am-|pm-)?unavailable|available)/); if (!m) return null;
     return { available: { available: true, checkin: true, checkout: true }, 'am-unavailable': { available: true, checkin: true, checkout: false }, 'pm-unavailable': { available: false, checkin: false, checkout: true }, unavailable: { available: false, checkin: false, checkout: false } }[m[1]];
+  }
+  /** «Este alojamiento no está disponible en Vrbo para tus fechas» (y variantes en inglés). */
+  function vrboUnavailableText(text) {
+    return /no est[aá] disponible(?: en [a-z]+)? (?:para|en) (?:tus|esas|estas|las) fechas|fechas no disponibles|(?:is ?n['’]?o?t|not) available(?: on [a-z]+)? for (?:your|these|those) dates/i.test(s(text));
   }
   function parseVrboPriceSummary(text) {
     const t = s(text); if (!t) return {};
@@ -239,7 +243,7 @@
     const p = qp(env); const ci = p.get('chkin') || p.get('startDate'); const co = p.get('chkout') || p.get('endDate');
     if (ci !== job.checkin || co !== job.checkout || Number(p.get('adults')) !== Number(job.guests)) return result('INCONSISTENTE', { reason: 'context_mismatch', error_detail: 'url_params' });
     const read = await waitFor(env, () => { const el = env.doc.querySelector('[data-stid="product-price-summary"]'); const r = parseVrboPriceSummary(el ? el.innerText || el.textContent : ''); if (r.total || r.unavailable) return r;
-      return /(?:no est[aá] disponible|not available) (?:para|for) (?:esas|these|las) fechas|fechas no disponibles/i.test(bodyText(env)) ? { unavailable: true } : null; }, 20000, 700);
+      return vrboUnavailableText(bodyText(env)) || env.doc.querySelector('[data-stid="alternate-availability"]') ? { unavailable: true } : null; }, 20000, 700);
     const base = { listing: { external_id: job.external_id }, final_url: env.loc.href };
     if (!read) return result('ESTRUCTURA_CAMBIADA', Object.assign(base, { reason: 'vrbo_price_not_found' }));
     if (read.unavailable) return result('SIN_DISPONIBILIDAD', Object.assign(base, { reason: 'dates_not_available', price: { checkin: job.checkin, checkout: job.checkout, guests: job.guests } }));
@@ -305,5 +309,5 @@
   function capabilities(opts) { const o = opts || {}; return { channels: o.direct === false ? ['airbnb', 'vrbo'] : ['airbnb', 'vrbo', 'direct'], direct_engines: SUPPORTED_DIRECT.slice(), channel_reader: VERSION }; }
 
   return { VERSION, READER_VERSION, SUPPORTED_DIRECT, run, capabilities, parseEuroAmount, totalsInText, classifyBlock, airbnbGlobalId, parseAirbnbCalendar, parseAirbnbBookIt, parseDayLabel, vrboDayState,
-    parseVrboPriceSummary, parseAmenitizAvailability, parseAmenitizRooms, parseAviratoText, detectEngine, bookingLinks, _internal: { airbnbCalendar, airbnbPrice, airbnbStayFromCalendar, vrboPrice, amenitizCalendar, amenitizPrice, aviratoPrice, probe, addDays } };
+    parseVrboPriceSummary, vrboUnavailableText, parseAmenitizAvailability, parseAmenitizRooms, parseAviratoText, detectEngine, bookingLinks, _internal: { airbnbCalendar, airbnbPrice, airbnbStayFromCalendar, vrboPrice, amenitizCalendar, amenitizPrice, aviratoPrice, probe, addDays } };
 });
