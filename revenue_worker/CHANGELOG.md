@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.0
+
+- Lector de canales ch1.1.0 (igual que la extensión 0.6.0): motores directos nuevos. Availroom v3 (API pública con entorno y propiedad),
+  MisterPlan (búsqueda de mrplan.io con casa y punto de venta), Avaibook (página de reserva con fechas y capacidad) y Thelis (campings) leen el
+  precio por estancia; HBook (WordPress) lee el calendario de la página. La sonda ya no confunde el enlace a la web comercial de un motor con su widget.
+
 ## 0.3.4
 
 - Lector de canales ch1.0.4 (igual que la extensión 0.5.4): rechaza el aviso de cookies de VRBO (OneTrust) antes de leer; calendario de VRBO en fichas

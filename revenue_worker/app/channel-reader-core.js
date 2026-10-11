@@ -1,5 +1,5 @@
 /*
- * Bulín 360 · lector de canales (Airbnb, VRBO y motores directos) · core compartido 1.0.3 (VRBO: «no está disponible en Vrbo para tus fechas»; Airbnb: sin bloque de reserva confirma con el calendario si la estancia no está disponible).
+ * Bulín 360 · lector de canales (Airbnb, VRBO y motores directos) · core compartido 1.1.0 (motores directos: Availroom v3, MisterPlan, Avaibook, HBook y Thelis).
  * ÚNICA fuente: la extensión Revenue Worker lo inyecta en la pestaña y el worker de Home Assistant lo carga con addScriptTag.
  * Protocolo: bulin360.channel.reader-envelope.v1 (ver api/revenue/_channels.php). run(job) devuelve el cuerpo del resultado:
  *   {status, reason, listing:{external_id}, calendar:[{date,available,checkin,checkout,min_nights,price}], price:{checkin,checkout,guests,total,
@@ -11,7 +11,12 @@
  *    2 meses por pantalla y botón «siguiente»); precio en [data-stid="product-price-summary"] («275 € … por 2 noches … incluye tasas»).
  *  - Amenitiz: API pública del motor en la web del alojamiento (/<idioma>/api_public/v1/client_booking_engine/availability y room_availability).
  *  - Avirato: booking.avirato.com/?code=…&startDate&endDate&adults&rooms → «160,00 € en total» por habitación o «Sin disponibilidad».
- *  - MisterPlan (reservaonline.support, mrplan.io), Availroom (bookingv3.availroom.com), Avaibook…: solo detección por la sonda.
+ *  - Availroom v3: API pública bookingv3.availroom.com/api/booking-engine (environmentId + propertyId; roomTypes con price, available, unitsFree).
+ *  - MisterPlan: JSONP mrplan.io …/accion.TSimpleSearch.php (id_casa + id_punto_venta) → HTML por habitación «Sólo 1 Disponible … para 2 … Total: 290,00€».
+ *  - Avaibook: www.avaibook.com/reservas/nueva_reserva.php?f_ini&f_fin&capacidad&cod_alojamiento → «Total 720.00 €» o «no hay disponibilidad».
+ *  - HBook (WordPress): calendario en la variable de la página hb_status_days_all (fully-taken / taken-start / taken-end).
+ *  - Thelis (campings): thelisresa.webcamp.fr/list.php?camping&begin&end&nb_pers → .thr-search-product con precio o sin bloque de precio.
+ *  - Resto de motores: solo detección por la sonda.
  * Las funciones parse… y detect… son puras y se prueban en Node (tests/extension-channels.test.mjs).
  */
 (function (root, factory) {
@@ -20,16 +25,18 @@
   else root.BulinChannelReader = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
-  const VERSION = '1.0.4';
-  const READER_VERSION = 'ch1.0.4';
+  const VERSION = '1.1.0';
+  const READER_VERSION = 'ch1.1.0';
   const AIRBNB_KEY = 'd306zoyjsyarp7ifhu67rjxn52tv0t20'; // clave pública de la web de Airbnb (también se lee de la página)
   const AIRBNB_CAL_HASH = 'bfd57b0552df2e8870f68d5cf501868a0e08417267469f55faefa78aca0234f4'; // respaldo si la página aún no lo ha pedido
   const ENGINES = {
     avirato: ['avirato.com', 'avirato.es'], availroom: ['availroom.com', 'availroom.es'], misterplan: ['misterplan.es', 'misterplan.com', 'reservaonline.support', 'mrplan.io'],
     avaibook: ['avaibook.com', 'avaibook.net', 'avaibook.es'], amenitiz: ['amenitiz.io', 'amenitiz.com', 'amenitiz.net'], lodgify: ['lodgify.com'], smoobu: ['smoobu.com'], beds24: ['beds24.com'],
-    octorate: ['octorate.com'], cloudbeds: ['cloudbeds.com'], roomcloud: ['roomcloud.net'], neobookings: ['neobookings.com'], mirai: ['mirai.com'], siteminder: ['thebookingbutton.com', 'siteminder.com'], hotetec: ['hotetec.com'],
+    octorate: ['octorate.com'], thelis: ['thelisresa.webcamp.fr', 'thelis.fr'], cloudbeds: ['cloudbeds.com'], roomcloud: ['roomcloud.net'], neobookings: ['neobookings.com'], mirai: ['mirai.com'], siteminder: ['thebookingbutton.com', 'siteminder.com'], hotetec: ['hotetec.com'],
   };
-  const SUPPORTED_DIRECT = ['amenitiz', 'avirato'];
+  const SUPPORTED_DIRECT = ['amenitiz', 'avirato', 'availroom', 'misterplan', 'avaibook', 'hbook', 'thelis'];
+  /** Enlaces a la web comercial del motor (pie «Software de reservas …») no son firma: solo cuentan recursos o enlaces al motor en sí. */
+  const MARKETING_PATH = /^\/(?:[a-z]{2}(?:-[a-z]{2})?\/?)?$/i;
   const MONTHS = { enero: 1, febrero: 2, marzo: 3, abril: 4, mayo: 5, junio: 6, julio: 7, agosto: 8, septiembre: 9, setiembre: 9, octubre: 10, noviembre: 11, diciembre: 12,
     january: 1, february: 2, march: 3, april: 4, may: 5, june: 6, july: 7, august: 8, september: 9, october: 10, november: 11, december: 12 };
 
@@ -129,6 +136,85 @@
     if (/sin disponibilidad|no hay disponibilidad|no availability/i.test(t)) return { unavailable: true, rooms_available: 0 };
     return {};
   }
+  /* ── Motores directos 1.1.0 ── */
+  /** environmentId/propertyId de Availroom (32 hex) en una URL, HTML o lista de recursos. */
+  function availroomIdsFromText(text) {
+    const t = String(text || '');
+    const e = t.match(/environment(?:Id)?=([A-F0-9]{32})/i); const p = t.match(/(?:approute=property\/|property(?:Id)?=|property\/)([A-F0-9]{32})/i);
+    return e && p ? { environment: e[1].toUpperCase(), property: p[1].toUpperCase() } : null;
+  }
+  /** Respuesta de bookingv3 → precio más bajo para el grupo y unidades libres. no_rates: tipos sin tarifa cargada (precio 0). */
+  function parseAvailroomV3(json, guests) {
+    const prop = json && Array.isArray(json.properties) ? json.properties[0] : null; if (!prop) return json && Array.isArray(json.properties) ? { total: null, rooms_listed: 0, rooms_available: 0 } : null;
+    const rts = Array.isArray(prop.roomTypes) ? prop.roomTypes : []; const g = Number(guests) || 1;
+    let best = null; let units = 0; let fit = 0; let zero = 0;
+    for (const r of rts) {
+      const cap = Number(r.maxCapacity || 0); if (cap && cap < g) continue; fit++;
+      const price = Number(r.price || 0); if (!(price > 0)) { zero++; continue; }
+      if (r.available === false || Number(r.unitsFree) === 0) continue;
+      units += Number(r.unitsFree || 1); if (best == null || price < best) best = Math.round(price * 100) / 100;
+    }
+    return { total: best, rooms_available: units, rooms_listed: rts.length, rooms_fit: fit, no_rates: rts.length > 0 && zero === rts.length };
+  }
+  /** id_casa / id_punto_venta de MisterPlan en URLs de recursos, HTML o una URL con #id_casa=…&id_punto_venta=… */
+  function misterplanIdsFromText(text) {
+    const t = String(text || '');
+    const c = t.match(/id_casa=(\d{3,9})/) || t.match(/id_elemento=(\d{3,9})&tipo_elemento=2/); const v = t.match(/id_punto_venta=(\d{1,9})/);
+    return c && v ? { id_casa: c[1], id_punto_venta: v[1] } : null;
+  }
+  const htmlText = (h) => String(h || '').replace(/\[br\]/g, ' ').replace(/<(script|style)\b[\s\S]*?<\/\1>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&euro;/g, '€').replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
+  /** resultado (HTML) de TSimpleSearch → habitaciones {name, units, options:[{guests,total}]} y la mejor para el grupo. */
+  function parseMisterplanResult(json, guests) {
+    if (!json || typeof json !== 'object' || typeof json.resultado !== 'string') return null;
+    const chunks = json.resultado.split(/class="[^"]*TSS8_capa_habitacion_padre/).slice(1); const g = Number(guests) || 1; const rooms = [];
+    for (const ch of chunks) {
+      const t = htmlText('<x ' + ch);
+      const units = t.match(/(\d+)\s+Disponibles?/i); const name = s((t.split(/S[óo]lo \d+ Disponible|\d+ Disponibles?/i)[0] || '').replace(/^[^>]*>/, '')).slice(0, 120);
+      const options = [...t.matchAll(/para (\d+)\b[\s\S]*?Total:\s*([\d.,]+)\s*€/gi)].map((m) => ({ guests: Number(m[1]), total: parseEuroAmount(m[2] + ' €') })).filter((o) => o.total);
+      rooms.push({ name, units: units ? Number(units[1]) : 1, options });
+    }
+    let best = null; let units = 0;
+    for (const r of rooms) {
+      const ok = r.options.filter((o) => o.guests === g); const opts = ok.length ? ok : r.options.filter((o) => o.guests > g);
+      if (!opts.length) continue; units += r.units;
+      const v = Math.min(...opts.map((o) => o.total)); if (best == null || v < best) best = v;
+    }
+    return { total: best, rooms_available: units, rooms_listed: rooms.length, error_code: String(json.error_code ?? ''), error_msg: s(json.error_msg) };
+  }
+  /** Página de Avaibook (nueva_reserva.php) → total o sin disponibilidad. Solo vale la línea «Total» (no depósito, resto ni fianza). */
+  function parseAvaibookText(text) {
+    const t = String(text || '');
+    if (/no hay disponibilidad para las fechas|no availability for the selected dates|alojamiento no est[aá] disponible/i.test(t)) return { unavailable: true };
+    const lines = t.split(/\n+/).map(s).filter(Boolean);
+    for (let i = 0; i < lines.length; i++) {
+      if (/^total\b/i.test(lines[i]) && !/dep[oó]sito|resto|fianza|pagar ahora|a pagar/i.test(lines[i])) {
+        const v = parseEuroAmount(lines[i]) ?? (lines[i + 1] ? parseEuroAmount(lines[i + 1]) : null); if (v) return { total: v };
+      }
+    }
+    return {};
+  }
+  /** hb_status_days_all (fecha → clases; o {alojamiento: {fecha → clases}}) → días. La noche está ocupada si el día está lleno o empieza una reserva. */
+  function parseHbookStatus(status, from, to) {
+    if (!status || typeof status !== 'object') return null;
+    const maps = Object.values(status).some((v) => v && typeof v === 'object') ? Object.values(status).filter((v) => v && typeof v === 'object') : [status];
+    const out = [];
+    for (let d = from; d <= to; d = addDays(d, 1)) {
+      let free = 0; let arrive = 0;
+      for (const m of maps) { const c = String(m[d] || ''); const taken = /fully-taken|taken-start/.test(c); if (!taken) free++; if (!/fully-taken/.test(c) && !/taken-start/.test(c)) arrive++; }
+      out.push({ date: d, available: free > 0, checkin: arrive > 0, checkout: true, min_nights: null, price: null, units_free: free });
+      if (out.length > 800) break;
+    }
+    return out;
+  }
+  /** Productos de Thelis (texto de cada .thr-search-product) → precio más bajo con capacidad suficiente. */
+  function parseThelisProducts(items, guests) {
+    if (!Array.isArray(items)) return null; const g = Number(guests) || 1; let best = null; let units = 0; let fit = 0;
+    for (const it of items) {
+      const cap = (String(it.text || '').match(/m²\s*(\d{1,2})\b/) || [])[1]; if (cap && Number(cap) < g) continue; fit++;
+      if (!it.price) continue; const v = parseEuroAmount(it.price); if (!v) continue; units++; if (best == null || v < best) best = v;
+    }
+    return { total: best, rooms_available: units, rooms_listed: items.length, rooms_fit: fit };
+  }
   /** Motor de reservas a partir del HTML y la URL de la web del competidor. */
   function detectEngine(html, pageUrl) {
     // El propio lector puede estar en el DOM como <script> (Home Assistant lo inyecta con addScriptTag): nunca cuenta como firma.
@@ -137,7 +223,16 @@
     const hostOf = (u) => { try { return new URL(u).hostname.toLowerCase(); } catch (e) { return ''; } };
     const matches = (host, d) => host === d || host.endsWith('.' + d);
     const score = {}; const first = {};
-    for (const u of links) { const host = hostOf(u); for (const [k, ds] of Object.entries(ENGINES)) if (ds.some((d) => matches(host, d))) { score[k] = (score[k] || 0) + 1; if (!first[k] && !/\.(js|css|png|jpe?g|svg|woff2?)(\?|$)/i.test(u)) first[k] = u; } }
+    for (const u of links) {
+      const host = hostOf(u); let path = '/'; let query = ''; try { const x = new URL(u); path = x.pathname; query = x.search; } catch (e) { /* nada */ }
+      for (const [k, ds] of Object.entries(ENGINES)) if (ds.some((d) => matches(host, d))) {
+        if (ds.some((d) => host === d || host === 'www.' + d) && MARKETING_PATH.test(path) && !query) continue; // enlace a la web comercial del motor
+        score[k] = (score[k] || 0) + 1; if (!first[k] && !/\.(js|css|png|jpe?g|svg|woff2?)(\?|$)/i.test(u)) first[k] = u;
+      }
+    }
+    if (/hb_status_days_all|\/wp-content\/plugins\/hbook\//i.test(h)) { score.hbook = (score.hbook || 0) + 3; first.hbook = first.hbook || pageUrl || ''; }
+    const ar = availroomIdsFromText(h); if (ar) { score.availroom = (score.availroom || 0) + 2; first.availroom = 'https://bookingengine.availroom.com/?environment=' + ar.environment + '&approute=property/' + ar.property; }
+    if (/TExpReverseInc\.php|core_search\/lib\/accion\.TSimpleSearch/i.test(h)) score.misterplan = (score.misterplan || 0) + 2;
     if (/cloudinary-cloud-name["']\s+content=["']amenitiz|desarrollado con amenitiz|powered by amenitiz|api_public\/v1\/client_booking_engine/i.test(h)) {
       score.amenitiz = (score.amenitiz || 0) + 3;
       const lang = (links.find((u) => origin && u.startsWith(origin) && /\/[a-z]{2}\/booking\/room/.test(u)) || '').match(/\/([a-z]{2})\/booking\/room/);
@@ -160,7 +255,7 @@
 
   function defaultEnv() {
     return { doc: typeof document !== 'undefined' ? document : null, loc: typeof location !== 'undefined' ? location : null, fetch: typeof fetch === 'function' ? fetch.bind(globalThis) : null,
-      perf: typeof performance !== 'undefined' ? performance : null, sleep: (ms) => new Promise((r) => setTimeout(r, ms)), now: () => Date.now() };
+      perf: typeof performance !== 'undefined' ? performance : null, win: typeof window !== 'undefined' ? window : globalThis, sleep: (ms) => new Promise((r) => setTimeout(r, ms)), now: () => Date.now() };
   }
   async function waitFor(env, fn, timeoutMs, stepMs) { const t0 = env.now(); for (;;) { const v = await fn(); if (v) return v; if (env.now() - t0 > timeoutMs) return null; await env.sleep(stepMs || 500); } }
   const result = (status, extra) => Object.assign({ status, reader_version: READER_VERSION }, extra || {});
@@ -306,6 +401,77 @@
     if (read.unavailable) return result('SIN_DISPONIBILIDAD', { reason: 'no_rooms', price: Object.assign(price, { rooms_available: 0 }), final_url: env.loc.href });
     return result('OK', { price: Object.assign(price, { total: read.total, rooms_available: read.rooms_available }), final_url: env.loc.href });
   }
+  /* ── Motores directos 1.1.0 (en la página) ── */
+  const priceBase = (job, extra) => Object.assign({ checkin: job.checkin, checkout: job.checkout, guests: job.guests, currency: 'EUR' }, extra || {});
+  function resourcesText(env) { try { return env.perf ? env.perf.getEntriesByType('resource').map((e) => e.name).join('\n') : ''; } catch (e) { return ''; } }
+  function pageHtml(env) { return env.doc && env.doc.documentElement ? String(env.doc.documentElement.outerHTML || '') : ''; }
+  /** Busca los códigos del motor: parámetros del trabajo (engine_params), URL, recursos cargados, HTML y, si no, las páginas de reserva enlazadas. */
+  async function engineIds(job, env, fromText, waitMs) {
+    const pre = job.engine_params && typeof job.engine_params === 'object' ? job.engine_params : null;
+    const direct = fromText([pre ? Object.entries(pre).map(([k, v]) => k + '=' + v).join('&') : '', job.url, job.engine_url, env.loc && env.loc.href].join('\n'));
+    if (direct) return direct;
+    const seen = await waitFor(env, () => fromText(resourcesText(env) + '\n' + pageHtml(env)), waitMs || 12000, 700); if (seen) return seen;
+    for (const u of bookingLinks(pageHtml(env), env.loc.href)) { try { const r = await env.fetch(u, { credentials: 'include' }); const h = await r.text(); const x = fromText(h); if (x) return x; } catch (e) { /* siguiente */ } }
+    return null;
+  }
+  async function availroomPrice(job, env) {
+    const ids = await engineIds(job, env, availroomIdsFromText, 8000);
+    if (!ids) return result('ESTRUCTURA_CAMBIADA', { reason: 'availroom_ids_not_found', error_detail: pageHint(env), final_url: env.loc.href });
+    const u = 'https://bookingv3.availroom.com/api/booking-engine?environmentId=' + ids.environment + '&flow=property&adults=' + Number(job.guests) + '&rooms=1&fromDate=' + job.checkin + '&toDate=' + job.checkout + '&lang=es&propertyId=' + ids.property + '&languages=es%2Cen';
+    const r = await env.fetch(u, { headers: { Accept: 'application/json' } }); let j = null; try { j = await r.json(); } catch (e) { j = null; }
+    const p = parseAvailroomV3(j, job.guests); if (!p) return result('ESTRUCTURA_CAMBIADA', { reason: 'availroom_shape', error_detail: 'HTTP ' + r.status, final_url: env.loc.href });
+    const price = priceBase(job, { rooms_available: p.rooms_available });
+    if (!p.total) return result('SIN_DISPONIBILIDAD', { reason: p.no_rates ? 'no_rates_loaded' : (p.rooms_fit ? 'no_rooms' : 'no_room_for_group'), price, final_url: env.loc.href });
+    return result('OK', { price: Object.assign(price, { total: p.total }), final_url: env.loc.href });
+  }
+  function jsonpDefault(env, url, timeoutMs) {
+    return new Promise((resolve) => {
+      const w = env.win || globalThis; const cb = '__b360mp' + env.now() + Math.floor(Math.random() * 1e6); const sc = env.doc.createElement('script'); let done = false;
+      const end = (v) => { if (done) return; done = true; try { delete w[cb]; } catch (e) { w[cb] = undefined; } try { sc.remove(); } catch (e) { /* nada */ } resolve(v); };
+      w[cb] = (d) => end(d); sc.onerror = () => end(null); setTimeout(() => end(null), timeoutMs || 20000);
+      sc.src = url + '&jsoncallback=' + cb; (env.doc.head || env.doc.documentElement).appendChild(sc);
+    });
+  }
+  async function misterplanPrice(job, env) {
+    const ids = await engineIds(job, env, misterplanIdsFromText, 12000);
+    if (!ids) return result('ESTRUCTURA_CAMBIADA', { reason: 'misterplan_ids_not_found', error_detail: pageHint(env), final_url: env.loc.href });
+    const dmy = (d) => d.slice(8, 10) + '/' + d.slice(5, 7) + '/' + d.slice(0, 4);
+    const u = 'https://mrplan.io/scr/modulos/core_search/lib/accion.TSimpleSearch.php?&smartphone=5&id_operador=1&id_oficina=0&id_idioma=0&id_casa=' + ids.id_casa + '&fecha_entrada=' + dmy(job.checkin) + '&fecha_salida=' + dmy(job.checkout) +
+      '&n_noches=' + nights(job.checkin, job.checkout) + '&ruta_raiz=https://mrplan.io/scr/&modo=2&SimpleSearchV=9&app=&TSS_presupuesto_app=0&capa_resultado=x&ews_activar_mas_menos=1&id_punto_venta=' + ids.id_punto_venta + '&id_moneda=1';
+    const j = await (env.jsonp ? env.jsonp(u) : jsonpDefault(env, u, 20000));
+    const p = parseMisterplanResult(j, job.guests); if (!p) return result('ESTRUCTURA_CAMBIADA', { reason: 'misterplan_shape', error_detail: j ? 'sin resultado' : 'jsonp_timeout', final_url: env.loc.href });
+    const price = priceBase(job, { rooms_available: p.rooms_available });
+    if (!p.total) return result('SIN_DISPONIBILIDAD', { reason: p.rooms_listed ? 'no_room_for_group' : 'no_rooms', error_detail: p.error_msg ? p.error_msg.slice(0, 200) : undefined, price, final_url: env.loc.href });
+    return result('OK', { price: Object.assign(price, { total: p.total }), final_url: env.loc.href });
+  }
+  async function avaibookPrice(job, env) {
+    const p = qp(env); if (p.get('f_ini') !== job.checkin || p.get('f_fin') !== job.checkout || Number(p.get('capacidad')) !== Number(job.guests)) return result('INCONSISTENTE', { reason: 'context_mismatch', error_detail: 'url_params' });
+    const read = await waitFor(env, () => { const r = parseAvaibookText(bodyText(env)); return r.total || r.unavailable ? r : null; }, 25000, 800);
+    if (!read) return result('ESTRUCTURA_CAMBIADA', { reason: 'avaibook_total_not_found', error_detail: pageHint(env), final_url: env.loc.href });
+    if (read.unavailable) return result('SIN_DISPONIBILIDAD', { reason: 'dates_not_available', price: priceBase(job, { rooms_available: 0 }), final_url: env.loc.href });
+    return result('OK', { price: priceBase(job, { total: read.total }), final_url: env.loc.href });
+  }
+  async function hbookCalendar(job, env) {
+    const w = env.win || globalThis; const st = await waitFor(env, () => w.hb_status_days_all || null, 15000, 600);
+    if (!st) return result('ESTRUCTURA_CAMBIADA', { reason: 'hbook_status_not_found', error_detail: pageHint(env), final_url: env.loc.href });
+    let from = job.range_from || new Date().toISOString().slice(0, 10); let to = job.range_to || addDays(from, 365);
+    const acc = w.hb_accom_data_0 || {}; if (/^\d{4}-\d{2}-\d{2}$/.test(acc.min_date || '') && acc.min_date > from) from = acc.min_date; if (/^\d{4}-\d{2}-\d{2}$/.test(acc.max_date || '') && acc.max_date < to) to = acc.max_date;
+    const days = parseHbookStatus(st, from, to); if (!days) return result('ESTRUCTURA_CAMBIADA', { reason: 'hbook_status_shape', final_url: env.loc.href });
+    return result('OK', { calendar: days, currency: 'EUR', final_url: env.loc.href });
+  }
+  async function thelisPrice(job, env) {
+    const p = qp(env); if (p.get('begin') !== job.checkin || p.get('end') !== job.checkout) return result('INCONSISTENTE', { reason: 'context_mismatch', error_detail: 'url_params' });
+    const items = await waitFor(env, () => { const els = [...env.doc.querySelectorAll('.thr-search-product')]; return els.length ? els : null; }, 25000, 800);
+    if (!items) {
+      if (/no hay (?:ning[uú]n )?(?:alojamiento|producto|disponibilidad)|aucun|no availability/i.test(bodyText(env))) return result('SIN_DISPONIBILIDAD', { reason: 'no_rooms', price: priceBase(job, { rooms_available: 0 }), final_url: env.loc.href });
+      return result('ESTRUCTURA_CAMBIADA', { reason: 'thelis_products_not_found', error_detail: pageHint(env), final_url: env.loc.href });
+    }
+    await env.sleep(1500);
+    const data = [...env.doc.querySelectorAll('.thr-search-product')].map((el) => { const cur = el.querySelector('.thr-promotion-description-thumbs-price') || el.querySelector('.thr-search-product-stay-price'); return { text: s(el.innerText || el.textContent), price: cur ? s(cur.innerText || cur.textContent) : null }; });
+    const r = parseThelisProducts(data, job.guests); const price = priceBase(job, { rooms_available: r.rooms_available });
+    if (!r.total) return result('SIN_DISPONIBILIDAD', { reason: r.rooms_fit ? 'no_rooms' : 'no_room_for_group', price, final_url: env.loc.href });
+    return result('OK', { price: Object.assign(price, { total: r.total }), final_url: env.loc.href });
+  }
   async function probe(job, env) {
     const html = env.doc && env.doc.documentElement ? env.doc.documentElement.outerHTML : '';
     let det = detectEngine(html, env.loc.href);
@@ -329,6 +495,11 @@
       else if (ch === 'vrbo') r = k === 'calendar' ? await vrboCalendar(job, env) : await vrboPrice(job, env);
       else if (ch === 'direct' && eng === 'amenitiz') r = k === 'calendar' ? await amenitizCalendar(job, env) : await amenitizPrice(job, env);
       else if (ch === 'direct' && eng === 'avirato' && k === 'price') r = await aviratoPrice(job, env);
+      else if (ch === 'direct' && eng === 'availroom' && k === 'price') r = await availroomPrice(job, env);
+      else if (ch === 'direct' && eng === 'misterplan' && k === 'price') r = await misterplanPrice(job, env);
+      else if (ch === 'direct' && eng === 'avaibook' && k === 'price') r = await avaibookPrice(job, env);
+      else if (ch === 'direct' && eng === 'hbook' && k === 'calendar') r = await hbookCalendar(job, env);
+      else if (ch === 'direct' && eng === 'thelis' && k === 'price') r = await thelisPrice(job, env);
       else r = result('ERROR', { reason: 'unsupported_' + ch + '_' + (eng || '') + '_' + k });
       const b2 = r.status !== 'OK' ? blocked(env) : null; if (b2) r = result(b2.status, { reason: b2.reason, final_url: env.loc.href });
       r.duration_ms = env.now() - t0; return r;
@@ -338,5 +509,6 @@
   function capabilities(opts) { const o = opts || {}; return { channels: o.direct === false ? ['airbnb', 'vrbo'] : ['airbnb', 'vrbo', 'direct'], direct_engines: SUPPORTED_DIRECT.slice(), channel_reader: VERSION }; }
 
   return { VERSION, READER_VERSION, SUPPORTED_DIRECT, run, capabilities, parseEuroAmount, totalsInText, classifyBlock, airbnbGlobalId, parseAirbnbCalendar, parseAirbnbBookIt, parseDayLabel, vrboDayState,
-    parseVrboPriceSummary, vrboUnavailableText, vrboDayStateAria, parseAmenitizAvailability, parseAmenitizRooms, parseAviratoText, detectEngine, bookingLinks, _internal: { dismissConsent, airbnbCalendar, airbnbPrice, airbnbStayFromCalendar, vrboPrice, amenitizCalendar, amenitizPrice, aviratoPrice, probe, addDays } };
+    parseVrboPriceSummary, vrboUnavailableText, vrboDayStateAria, parseAmenitizAvailability, parseAmenitizRooms, parseAviratoText, availroomIdsFromText, parseAvailroomV3, misterplanIdsFromText, parseMisterplanResult, parseAvaibookText, parseHbookStatus, parseThelisProducts, detectEngine, bookingLinks,
+    _internal: { availroomPrice, misterplanPrice, avaibookPrice, hbookCalendar, thelisPrice, dismissConsent, airbnbCalendar, airbnbPrice, airbnbStayFromCalendar, vrboPrice, amenitizCalendar, amenitizPrice, aviratoPrice, probe, addDays } };
 });
