@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.4
+
+- Lector de canales ch1.0.4 (igual que la extensión 0.5.4): rechaza el aviso de cookies de VRBO (OneTrust) antes de leer; calendario de VRBO en fichas
+  tipo alojamiento sin colores de ocupación (solo los días «no disponible» cuentan como cerrados; sin ninguno, lectura parcial en vez de error);
+  en «estructura cambiada» envía una pista de lo que vio (título, fechas del selector, bloques presentes).
+
 ## 0.3.3
 
 - Lector de canales ch1.0.3 (igual que la extensión 0.5.3): en VRBO, «Este alojamiento no está disponible en Vrbo para tus fechas» cuenta como

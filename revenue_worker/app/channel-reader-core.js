@@ -20,8 +20,8 @@
   else root.BulinChannelReader = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
-  const VERSION = '1.0.3';
-  const READER_VERSION = 'ch1.0.3';
+  const VERSION = '1.0.4';
+  const READER_VERSION = 'ch1.0.4';
   const AIRBNB_KEY = 'd306zoyjsyarp7ifhu67rjxn52tv0t20'; // clave pública de la web de Airbnb (también se lee de la página)
   const AIRBNB_CAL_HASH = 'bfd57b0552df2e8870f68d5cf501868a0e08417267469f55faefa78aca0234f4'; // respaldo si la página aún no lo ha pedido
   const ENGINES = {
@@ -95,6 +95,12 @@
   function vrboUnavailableText(text) {
     return /no est[aá] disponible(?: en [a-z]+)? (?:para|en) (?:tus|esas|estas|las) fechas|fechas no disponibles|(?:is ?n['’]?o?t|not) available(?: on [a-z]+)? for (?:your|these|those) dates/i.test(s(text));
   }
+  /** Selector sin colores de ocupación: solo los días futuros marcados «no está disponible» (aria-disabled) se dan por cerrados. */
+  function vrboDayStateAria(label, btn, today) {
+    const date = parseDayLabel(label); if (!date || date < today) return null;
+    const off = /no est[aá] disponible|not available|unavailable/i.test(s(label)) || (btn && btn.getAttribute && btn.getAttribute('aria-disabled') === 'true');
+    return off ? { available: false, checkin: false, checkout: null } : null;
+  }
   function parseVrboPriceSummary(text) {
     const t = s(text); if (!t) return {};
     if (/no disponible|not available|fechas no v[aá]lidas|unavailable/i.test(t) && !/€/.test(t)) return { unavailable: true };
@@ -159,6 +165,24 @@
   async function waitFor(env, fn, timeoutMs, stepMs) { const t0 = env.now(); for (;;) { const v = await fn(); if (v) return v; if (env.now() - t0 > timeoutMs) return null; await env.sleep(stepMs || 500); } }
   const result = (status, extra) => Object.assign({ status, reader_version: READER_VERSION }, extra || {});
   function bodyText(env) { return env.doc && env.doc.body ? String(env.doc.body.innerText || env.doc.body.textContent || '') : ''; }
+  /** 0.5.4 · pista de lo que vio el worker cuando no encuentra lo esperado (aparece en «Últimos errores de lectura»). */
+  function pageHint(env) {
+    const d = env.doc; if (!d) return '';
+    const v = (sel) => { const e = d.querySelector(sel); return e ? s(e.value || e.innerText || e.textContent || '').slice(0, 40) : '-'; };
+    const parts = ['título: ' + s(d.title).slice(0, 60), 'url: ' + String(env.loc.href).replace(/^https?:\/\/[^/]+/, '').slice(0, 110),
+      'fechas: ' + v('[data-stid="uitk-date-selector-input1-default"]') + ' → ' + v('[data-stid="uitk-date-selector-input2-default"]'),
+      'bloques: ' + ['product-price-summary', 'alternate-availability', 'error-messages', 'submit-hotel-reserve'].filter((x) => d.querySelector('[data-stid="' + x + '"]')).join(',') + (d.querySelector('[data-testid="book-it-default"]') ? ',book-it' : ''),
+      'ancho: ' + ((typeof window !== 'undefined' && window.innerWidth) || '?')];
+    return parts.join(' · ').slice(0, 380);
+  }
+  /** 0.5.4 · aviso de cookies (OneTrust de VRBO/Expedia y similares): se rechazan las no necesarias para poder usar la página. */
+  function dismissConsent(env) {
+    const d = env.doc; if (!d || !d.querySelector) return false;
+    let btn = d.querySelector('#onetrust-reject-all-handler, .ot-pc-refuse-all-handler, #didomi-notice-disagree-button, [data-testid="reject-all-cookies"]');
+    if (!btn && typeof d.querySelectorAll === 'function') btn = [...d.querySelectorAll('button')].find((x) => /^(rechazar(las)? todas(?: las cookies)?|rechazar todo|solo (?:las )?(?:cookies )?necesarias|reject all(?: cookies)?|only necessary(?: cookies)?)$/i.test(s(x.innerText || x.textContent)));
+    if (!btn) return false;
+    try { btn.click(); return true; } catch (e) { return false; }
+  }
   function blocked(env) { return classifyBlock(bodyText(env), env.doc && env.doc.title); }
   function clampDays(days, job) { return days.filter((d) => (!job.range_from || d.date >= job.range_from) && (!job.range_to || d.date <= job.range_to)); }
   function qp(env) { try { return new URL(env.loc.href).searchParams; } catch (e) { return new URLSearchParams(); } }
@@ -217,7 +241,7 @@
       if (st && st.restriction) return result('RESTRICCION', Object.assign(base, { reason: 'min_nights', price: { checkin: job.checkin, checkout: job.checkout, guests: job.guests, min_nights: st.min_nights } }));
       const cap = bodyText(env).match(/m[aá]ximo de (\d+) (?:hu[eé]spedes|personas|viajeros)|maximum of (\d+) guests/i);
       if (cap && Number(cap[1] || cap[2]) < Number(job.guests)) return result('RESTRICCION', Object.assign(base, { reason: 'max_guests', error_detail: 'máximo ' + (cap[1] || cap[2]) + ' huéspedes', price: { checkin: job.checkin, checkout: job.checkout, guests: job.guests } }));
-      return result('ESTRUCTURA_CAMBIADA', Object.assign(base, { reason: 'airbnb_bookit_not_found' }));
+      return result('ESTRUCTURA_CAMBIADA', Object.assign(base, { reason: 'airbnb_bookit_not_found', error_detail: pageHint(env) }));
     }
     if (read.unavailable) return result('SIN_DISPONIBILIDAD', Object.assign(base, { reason: 'dates_not_available', price: { checkin: job.checkin, checkout: job.checkout, guests: job.guests } }));
     if (read.restriction) return result('RESTRICCION', Object.assign(base, { reason: 'min_nights', price: { checkin: job.checkin, checkout: job.checkout, guests: job.guests, min_nights: read.min_nights } }));
@@ -227,13 +251,17 @@
     if (vrboNotListed(env)) return result('ESTRUCTURA_CAMBIADA', { reason: 'listing_not_on_vrbo', error_detail: 'VRBO redirige a una búsqueda: este id no es un alquiler de VRBO', final_url: env.loc.href });
     const d = env.doc; const opened = await waitFor(env, () => { if (d.querySelector('.uitk-day-button')) return true; const t = d.querySelector('[data-stid="uitk-date-selector-input1-default"]'); if (t) t.click(); return false; }, 15000, 800);
     if (!opened) return result('ESTRUCTURA_CAMBIADA', { reason: 'vrbo_calendar_not_found', final_url: env.loc.href });
-    const to = job.range_to || addDays(new Date().toISOString().slice(0, 10), 365); const map = new Map();
-    const readAll = () => { for (const b of d.querySelectorAll('.uitk-day-button')) { const lab = b.querySelector('.uitk-day-aria-label'); const date = parseDayLabel(lab && lab.getAttribute('aria-label')); const bg = b.querySelector('[class*="uitk-background-"]'); const st = vrboDayState(bg && bg.className); if (date && st) map.set(date, Object.assign({ date, min_nights: null, price: null }, st)); } };
+    const today = new Date().toISOString().slice(0, 10); const to = job.range_to || addDays(today, 365); const map = new Map();
+    const readAll = () => { for (const b of d.querySelectorAll('.uitk-day-button')) { const lab = b.querySelector('.uitk-day-aria-label'); const date = parseDayLabel(lab && lab.getAttribute('aria-label')); const bg = b.querySelector('[class*="uitk-background-"]'); const st = vrboDayState(bg && bg.className) || vrboDayStateAria(lab && lab.getAttribute('aria-label'), b, today); if (date && st) map.set(date, Object.assign({ date, min_nights: null, price: null }, st)); } };
     for (let i = 0; i < 9; i++) {
       readAll(); const last = [...map.keys()].sort().pop(); if (last && last >= to) break;
       const n = d.querySelector('[data-stid="uitk-calendar-navigation-controls-next-button"]'); if (!n || n.disabled) break; n.click(); await env.sleep(700);
     }
-    if (!map.size) return result('ESTRUCTURA_CAMBIADA', { reason: 'vrbo_days_unreadable', final_url: env.loc.href });
+    if (!map.size) {
+      // Fichas tipo alojamiento (con «apartamento/habitación»): VRBO no pinta la ocupación en el selector; la disponibilidad sale de las lecturas de precio.
+      if (d.querySelector('.uitk-day-button .uitk-day-aria-label')) return result('PARCIAL', { reason: 'vrbo_calendar_without_availability', listing: { external_id: job.external_id }, calendar: [], currency: 'EUR', final_url: env.loc.href });
+      return result('ESTRUCTURA_CAMBIADA', { reason: 'vrbo_days_unreadable', error_detail: pageHint(env), final_url: env.loc.href });
+    }
     return result('OK', { listing: { external_id: job.external_id }, calendar: clampDays([...map.values()].sort((a, b) => (a.date < b.date ? -1 : 1)), job), currency: 'EUR', final_url: env.loc.href });
   }
   /** VRBO redirige a una búsqueda cuando el id (p. ej. un hotel de Expedia /pdp/lo/<id>) no es un alquiler suyo. */
@@ -245,7 +273,7 @@
     const read = await waitFor(env, () => { const el = env.doc.querySelector('[data-stid="product-price-summary"]'); const r = parseVrboPriceSummary(el ? el.innerText || el.textContent : ''); if (r.total || r.unavailable) return r;
       return vrboUnavailableText(bodyText(env)) || env.doc.querySelector('[data-stid="alternate-availability"]') ? { unavailable: true } : null; }, 20000, 700);
     const base = { listing: { external_id: job.external_id }, final_url: env.loc.href };
-    if (!read) return result('ESTRUCTURA_CAMBIADA', Object.assign(base, { reason: 'vrbo_price_not_found' }));
+    if (!read) return result('ESTRUCTURA_CAMBIADA', Object.assign(base, { reason: 'vrbo_price_not_found', error_detail: pageHint(env) }));
     if (read.unavailable) return result('SIN_DISPONIBILIDAD', Object.assign(base, { reason: 'dates_not_available', price: { checkin: job.checkin, checkout: job.checkout, guests: job.guests } }));
     if (read.nights && read.nights !== nights(job.checkin, job.checkout)) return result('INCONSISTENTE', Object.assign(base, { reason: 'context_mismatch', error_detail: 'nights_' + read.nights }));
     return result('OK', Object.assign(base, { price: { checkin: job.checkin, checkout: job.checkout, guests: job.guests, total: read.total, currency: 'EUR' } }));
@@ -292,6 +320,7 @@
     const env = Object.assign(defaultEnv(), envIn || {}); const t0 = env.now();
     try {
       await waitFor(env, () => env.doc && env.doc.readyState !== 'loading', 10000, 300);
+      if (dismissConsent(env)) await env.sleep(1200);
       const b = blocked(env); if (b) return result(b.status, { reason: b.reason, final_url: env.loc.href, duration_ms: env.now() - t0 });
       const k = job.run_kind; const ch = job.channel; const eng = job.engine;
       let r;
@@ -309,5 +338,5 @@
   function capabilities(opts) { const o = opts || {}; return { channels: o.direct === false ? ['airbnb', 'vrbo'] : ['airbnb', 'vrbo', 'direct'], direct_engines: SUPPORTED_DIRECT.slice(), channel_reader: VERSION }; }
 
   return { VERSION, READER_VERSION, SUPPORTED_DIRECT, run, capabilities, parseEuroAmount, totalsInText, classifyBlock, airbnbGlobalId, parseAirbnbCalendar, parseAirbnbBookIt, parseDayLabel, vrboDayState,
-    parseVrboPriceSummary, vrboUnavailableText, parseAmenitizAvailability, parseAmenitizRooms, parseAviratoText, detectEngine, bookingLinks, _internal: { airbnbCalendar, airbnbPrice, airbnbStayFromCalendar, vrboPrice, amenitizCalendar, amenitizPrice, aviratoPrice, probe, addDays } };
+    parseVrboPriceSummary, vrboUnavailableText, vrboDayStateAria, parseAmenitizAvailability, parseAmenitizRooms, parseAviratoText, detectEngine, bookingLinks, _internal: { dismissConsent, airbnbCalendar, airbnbPrice, airbnbStayFromCalendar, vrboPrice, amenitizCalendar, amenitizPrice, aviratoPrice, probe, addDays } };
 });
