@@ -4,7 +4,7 @@ const puppeteer = require('puppeteer-core');
 const fs = require('fs');
 const path = require('path');
 
-const WORKER_VERSION = 'ha-0.4.0';
+const WORKER_VERSION = 'ha-0.4.1';
 const SOURCE_EXTENSION_VERSION = '0.5.0';
 const READER_VERSION = 'v14.1-worker+settle5s';
 const CHROME_BIN = process.env.CHROME_BIN || '/usr/bin/chromium-browser';
@@ -475,6 +475,17 @@ async function preparePage(page) {
 
 /** Trabajo de canal (M18): abre la URL del trabajo, inyecta el lector de canales y envía el resultado con job_kind channel.
  *  Un CAPTCHA en un canal no pausa el worker: el Panel enfría ese canal y el worker sigue con Booking y el resto. */
+/** ha-0.4.1 · VRBO solo abre su selector de fechas con un clic real: Playwright lo hace (rechazando antes las cookies) y el lector lee los días. */
+async function openVrboCalendar(page) {
+  try {
+    const reject = await page.$('#onetrust-reject-all-handler'); if (reject && await reject.isVisible().catch(() => false)) { await reject.click().catch(() => {}); await sleep(800); }
+    const trigger = '[data-stid="uitk-date-selector-input1-default"]';
+    await page.waitForSelector(trigger, { timeout: 10000 });
+    for (let i = 0; i < 2; i++) { await page.click(trigger, { timeout: 5000 }).catch(() => {}); if (await page.waitForSelector('.uitk-day-button', { timeout: 6000 }).then(() => true).catch(() => false)) return true; }
+  } catch (e) { log('[vrbo] no se pudo abrir el calendario:', String(e && e.message || e).slice(0, 120)); }
+  return false;
+}
+
 async function processChannelJob(browser, claim) {
   const job = claim.job; const attemptId = claim.attempt_id; const started = Date.now();
   log(`[canal ${job.id}]`, job.channel, job.engine || '', job.run_kind, job.competitor_name || '', job.checkin || job.range_from || '', '->', job.checkout || job.range_to || '');
@@ -488,6 +499,7 @@ async function processChannelJob(browser, claim) {
       await sleep(2500);
       const tag = await page.addScriptTag({ content: channelSource });
       await tag.evaluate((el) => el.remove()).catch(() => {}); // el lector queda cargado pero fuera del DOM (la sonda analiza el HTML de la web)
+      if (job.channel === 'vrbo' && job.run_kind === 'calendar') await openVrboCalendar(page);
       res = await page.evaluate((j) => globalThis.BulinChannelReader.run(j), job);
     }
   } catch (error) { res = { status: 'ERROR', reason: 'channel_exception', error_detail: String(error && error.message || error).slice(0, 300) }; }

@@ -25,8 +25,8 @@
   else root.BulinChannelReader = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
-  const VERSION = '1.1.0';
-  const READER_VERSION = 'ch1.1.0';
+  const VERSION = '1.1.1';
+  const READER_VERSION = 'ch1.1.1';
   const AIRBNB_KEY = 'd306zoyjsyarp7ifhu67rjxn52tv0t20'; // clave pública de la web de Airbnb (también se lee de la página)
   const AIRBNB_CAL_HASH = 'bfd57b0552df2e8870f68d5cf501868a0e08417267469f55faefa78aca0234f4'; // respaldo si la página aún no lo ha pedido
   const ENGINES = {
@@ -345,7 +345,10 @@
   async function vrboCalendar(job, env) {
     if (vrboNotListed(env)) return result('ESTRUCTURA_CAMBIADA', { reason: 'listing_not_on_vrbo', error_detail: 'VRBO redirige a una búsqueda: este id no es un alquiler de VRBO', final_url: env.loc.href });
     const d = env.doc; const opened = await waitFor(env, () => { if (d.querySelector('.uitk-day-button')) return true; const t = d.querySelector('[data-stid="uitk-date-selector-input1-default"]'); if (t) t.click(); return false; }, 15000, 800);
-    if (!opened) return result('ESTRUCTURA_CAMBIADA', { reason: 'vrbo_calendar_not_found', final_url: env.loc.href });
+    // ch1.1.1 · VRBO (oct-2026) solo abre el selector de fechas con un clic real del usuario: un clic por script no lo abre. Si el botón está y el
+    // calendario no aparece, no es un cambio de estructura: lectura parcial (la disponibilidad sale de las lecturas de precio; el worker de HA hace el clic real).
+    if (!opened) return d.querySelector('[data-stid="uitk-date-selector-input1-default"]') ? result('PARCIAL', { reason: 'vrbo_calendar_needs_real_click', listing: { external_id: job.external_id }, calendar: [], currency: 'EUR', final_url: env.loc.href })
+      : result('ESTRUCTURA_CAMBIADA', { reason: 'vrbo_calendar_not_found', error_detail: pageHint(env), final_url: env.loc.href });
     const today = new Date().toISOString().slice(0, 10); const to = job.range_to || addDays(today, 365); const map = new Map();
     const readAll = () => { for (const b of d.querySelectorAll('.uitk-day-button')) { const lab = b.querySelector('.uitk-day-aria-label'); const date = parseDayLabel(lab && lab.getAttribute('aria-label')); const bg = b.querySelector('[class*="uitk-background-"]'); const st = vrboDayState(bg && bg.className) || vrboDayStateAria(lab && lab.getAttribute('aria-label'), b, today); if (date && st) map.set(date, Object.assign({ date, min_nights: null, price: null }, st)); } };
     for (let i = 0; i < 9; i++) {

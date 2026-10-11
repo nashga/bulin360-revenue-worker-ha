@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.1
+
+- VRBO solo abre su calendario con un clic real (un clic por script ya no lo abre): el worker lo hace con Playwright, rechazando antes las cookies, y el
+  lector ch1.1.1 lee los días. Si aun así no se abre, la lectura queda parcial (no «estructura cambiada»).
+
 ## 0.4.0
 
 - Lector de canales ch1.1.0 (igual que la extensión 0.6.0): motores directos nuevos. Availroom v3 (API pública con entorno y propiedad),
