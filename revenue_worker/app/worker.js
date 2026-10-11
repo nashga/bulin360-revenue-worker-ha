@@ -4,8 +4,8 @@ const puppeteer = require('puppeteer-core');
 const fs = require('fs');
 const path = require('path');
 
-const WORKER_VERSION = 'ha-0.1.2';
-const SOURCE_EXTENSION_VERSION = '0.3.103';
+const WORKER_VERSION = 'ha-0.2.0';
+const SOURCE_EXTENSION_VERSION = '0.4.1';
 const READER_VERSION = 'v14.1-worker+settle5s';
 const CHROME_BIN = process.env.CHROME_BIN || '/usr/bin/chromium-browser';
 
@@ -203,14 +203,15 @@ async function injectReader(page) {
 }
 
 function contextForJob(job, attemptId) {
-  let slug = '';
-  try {
-    slug = new URL(job.url).pathname.split('/').pop()?.replace(/\.html$/i, '') || '';
-  } catch (_) {}
+  let slug = String(job.booking_slug || '');
+  if (!slug) {
+    try { const m = new URL(job.url).pathname.match(/\/hotel\/[^/]+\/([^/.]+)/); slug = m ? m[1] : ''; } catch (_) {}
+  }
   return {
     job_id: String(job.id || ''),
     attempt_id: String(attemptId || ''),
     competitor_id: String(job.competitor_id || ''),
+    competitor_name: String(job.competitor_name || ''),
     checkin: job.checkin || '',
     checkout: job.checkout || '',
     adults: Number(job.requested_adults || 0),
@@ -278,7 +279,6 @@ async function runReader(page, ctx) {
       return { retry: true, reason: 'context_mismatch', validation_errors: match.errors, actual: match.actual, final_url: location.href };
     }
 
-    const propertyState = Core.propertyIdentity(location.href, ctx);
     const cls = Core.classifyPage(document, location);
     if (cls.status) {
       const terminalPayload = { meta: { checkin: ctx.checkin, checkout: ctx.checkout, adults: ctx.adults, url: location.href, captured_at: new Date().toISOString() } };
@@ -301,24 +301,9 @@ async function runReader(page, ctx) {
       readBookingPage: async () => globalThis.BulinBookingReadV14(),
     });
 
-    const payload = env.payload || {};
-    const hasCommercialData = (Array.isArray(payload.inventory_summary) && payload.inventory_summary.length > 0)
-      || (Array.isArray(payload.offers) && payload.offers.length > 0)
-      || (Array.isArray(payload.rows) && payload.rows.length > 0);
-
-    if (!hasCommercialData && propertyState.redirected && [
-      Core.RESULT_STATUSES.PARCIAL,
-      Core.RESULT_STATUSES.ESTRUCTURA_CAMBIADA,
-    ].includes(env.status)) {
-      env = Core.makeEnvelope(payload, ctx, {
-        reader_version: readerVersion,
-        worker_version: workerVersion,
-        status: Core.RESULT_STATUSES.PROPERTY_NOT_AVAILABLE_FOR_DATES,
-        status_reason: propertyState.reason,
-        duration_ms: Date.now() - started,
-        final_url: location.href,
-      });
-    }
+    // Identidad tras la lectura con el core compartido (igual que la extensión 0.4.1): URL canónica de la misma ficha → OK con aviso;
+    // otro alojamiento con datos → INCONSISTENTE property_mismatch (no se ingiere); redirigida sin datos → PROPERTY_NOT_AVAILABLE_FOR_DATES.
+    env = Core.applyIdentity(env, ctx, { reader_version: readerVersion, worker_version: workerVersion, final_url: location.href, duration_ms: Date.now() - started });
     return { envelope: env, payload: env.payload || {} };
   }, { ctx, readerDeadlineMs: CONFIG.readerDeadlineMs, readerVersion: READER_VERSION, workerVersion: WORKER_VERSION });
 }

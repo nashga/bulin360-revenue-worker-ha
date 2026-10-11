@@ -1,3 +1,11 @@
+/*
+ * Lector Booking · core compartido (ÚNICA fuente). Lo usan el Panel (assets/shared) y la extensión Revenue Worker,
+ * a la que el build lo copia; el build y un test fallan si las dos copias difieren (§13 error 2).
+ * 1.1.1 (extensión 0.3.105, producción): «no es posible realizar reservas…» → PROPERTY_NOT_AVAILABLE_FOR_DATES si no hay selectores;
+ *        los avisos de validación ya no degradan una lectura válida a PARCIAL.
+ * 1.2.0: resolveIdentity() tras la lectura — un cambio de slug con el MISMO alojamiento (URL canónica) se acepta; otro alojamiento → property_mismatch;
+ *        redirección sin datos comerciales → PROPERTY_NOT_AVAILABLE_FOR_DATES. Más textos de «no disponible en nuestra web». READ_DEADLINE_MS único.
+ */
 (function(root,factory){
   const api=factory();
   if(typeof module==='object'&&module.exports) module.exports=api;
@@ -5,7 +13,8 @@
 })(typeof globalThis!=='undefined'?globalThis:this,function(){
   'use strict';
 
-  const VERSION='1.1.1';
+  const VERSION='1.2.0';
+  const READ_DEADLINE_MS=45000; // único tiempo de lectura para Panel y extensión (§10)
   const RESULT_STATUSES=Object.freeze({
     OK:'OK', PARCIAL:'PARCIAL', SIN_DISPONIBILIDAD:'SIN_DISPONIBILIDAD',
     RESTRICCION:'RESTRICCION', PROPERTY_NOT_AVAILABLE_FOR_DATES:'PROPERTY_NOT_AVAILABLE_FOR_DATES', CAPTCHA:'CAPTCHA', BLOQUEADO:'BLOQUEADO',
@@ -34,7 +43,7 @@
     const restriction=/estancia m[ií]nima|min(?:imum)? stay|no se puede hacer el check-in|closed to arrival|restricci[oó]n de estancia/i.test(text);
     if(restriction) return {status:RESULT_STATUSES.RESTRICCION,reason:'explicit_booking_restriction'};
     const hasRoomSelectors=!!d.querySelector('select');
-    const explicitPropertyUnavailable=/no es posible realizar reservas en este hotel en nuestra p[aá]gina|currently not possible to make reservations at this hotel on our site|not possible to make a reservation at this property/i.test(text);
+    const explicitPropertyUnavailable=/no es posible realizar reservas en este hotel en nuestra p[aá]gina|currently not possible to make reservations at this hotel on our site|not possible to make a reservation at this property|no (?:est[aá]|se encuentra) disponible en nuestra web|isn['’]t available on our (?:site|website)|(?:is )?not (?:currently )?accepting (?:reservations|bookings)/i.test(text);
     if(explicitPropertyUnavailable&&!hasRoomSelectors) return {status:RESULT_STATUSES.PROPERTY_NOT_AVAILABLE_FOR_DATES,reason:'explicit_property_not_bookable_on_booking'};
     const hasBookingSignals=/booking\.com/i.test(s(l.hostname)+' '+href)||/Booking\.com/i.test(text.slice(0,5000));
     if(hasBookingSignals&&hasRoomSelectors) return {status:null,reason:'candidate_ready'};
@@ -53,6 +62,48 @@
     }catch(e){return {matched:null,redirected:false,reason:'property_url_unreadable'};}
   }
 
+  const STOP=new Set(['hotel','hostal','casa','casas','rural','rurales','apartamento','apartamentos','apartament','alojamiento','alojamientos','posada','la','el','los','las','de','del','y','en','the','and','of']);
+  function nameTokens(v){
+    const t=s(v).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,' ').trim();
+    return t?t.split(' ').filter(w=>w.length>=3&&!STOP.has(w)):[];
+  }
+  /** ¿Dos nombres de alojamiento se refieren al mismo? (comparte una palabra significativa o uno contiene al otro). */
+  function sameProperty(a,b){
+    const A=nameTokens(a), B=nameTokens(b); if(!A.length||!B.length) return null;
+    const joinA=A.join(' '), joinB=B.join(' ');
+    if(joinA.includes(joinB)||joinB.includes(joinA)) return true;
+    return A.some(w=>w.length>=4&&B.includes(w));
+  }
+  /**
+   * Identidad tras la lectura (§9 F3, §13 error 3, lección de 0.3.102: Booking canonicaliza slugs de la MISMA ficha).
+   * - slug esperado en la URL → ok
+   * - redirigida y SIN datos comerciales → PROPERTY_NOT_AVAILABLE_FOR_DATES (ficha fuera de venta para esas fechas)
+   * - redirigida a otra ficha CON datos: si el nombre leído coincide con el competidor → ok (aviso property_slug_canonicalized);
+   *   si no coincide o no se puede comprobar → INCONSISTENTE property_mismatch (nunca se atribuyen precios de otro alojamiento)
+   */
+  function resolveIdentity(url,ctx,payload){
+    const c=ctx||{}; const id=propertyIdentity(url,c);
+    if(id.matched!==false) return {ok:true,reason:id.reason,warnings:[]};
+    const p=payload||{};
+    const hasData=arr(p.inventory_summary).length>0||arr(p.offers).length>0||arr(p.rows).length>0;
+    if(!hasData) return {ok:false,status:RESULT_STATUSES.PROPERTY_NOT_AVAILABLE_FOR_DATES,reason:id.reason,errors:[],warnings:[]};
+    const same=id.reason==='property_redirected_to_different_property'?sameProperty((p.meta||{}).property,c.competitor_name):false;
+    if(same===true) return {ok:true,reason:'property_slug_canonicalized',warnings:['property_slug_canonicalized']};
+    return {ok:false,status:RESULT_STATUSES.INCONSISTENTE,reason:id.reason,errors:['property_mismatch'],warnings:[]};
+  }
+
+  /**
+   * Aplica resolveIdentity a un sobre ya leído (lo usan la extensión y el worker de Home Assistant, para que ambos decidan igual).
+   * Solo actúa sobre lecturas OK / PARCIAL / ESTRUCTURA_CAMBIADA; los estados clasificados (CAPTCHA, sin disponibilidad…) se respetan.
+   */
+  function applyIdentity(env,ctx,extra){
+    const e=env||{}; if(![RESULT_STATUSES.OK,RESULT_STATUSES.PARCIAL,RESULT_STATUSES.ESTRUCTURA_CAMBIADA].includes(e.status)) return e;
+    const url=s(e.final_url)||s(((e.payload||{}).meta||{}).url);
+    const r=resolveIdentity(url,ctx,e.payload||{});
+    if(r.ok){ if(r.warnings.length) e.validation_warnings=uniq([...arr(e.validation_warnings),...r.warnings]); return e; }
+    return makeEnvelope(e.payload||{},ctx,Object.assign({},extra||{},{status:r.status,status_reason:r.reason,validation_errors:r.errors,final_url:url,duration_ms:e.duration_ms}));
+  }
+
   function queryEchoFromUrl(url){
     try{
       const u=new URL(url||((typeof location!=='undefined')?location.href:''));
@@ -69,6 +120,7 @@
       };
     }catch(e){return {checkin:'',checkout:'',adults:'',requested_rooms:'',kind:''};}
   }
+
 
   function contextMatchesUrl(url,ctx){
     const c=ctx||{}; const q=queryEchoFromUrl(url);
@@ -145,8 +197,8 @@
       status:ex.status||validation.status,
       status_reason:s(ex.status_reason||''),
       fields_missing:validation.fields_missing,
-      validation_errors:validation.errors,
-      validation_warnings:validation.warnings,
+      validation_errors:uniq([...validation.errors,...arr(ex.validation_errors)]),
+      validation_warnings:uniq([...validation.warnings,...arr(ex.validation_warnings)]),
       final_url:s(ex.final_url||((result&&result.meta&&result.meta.url)||'')),
       duration_ms:n(ex.duration_ms),
       captured_at:s((result&&result.meta&&result.meta.captured_at)||now),
@@ -189,5 +241,5 @@
     } finally {}
   }
 
-  return {VERSION,RESULT_STATUSES,classifyPage,propertyIdentity,queryEchoFromUrl,contextMatchesUrl,validateResult,makeEnvelope,fingerprintDocument,waitUntilReady};
+  return {VERSION,READ_DEADLINE_MS,RESULT_STATUSES,classifyPage,propertyIdentity,sameProperty,resolveIdentity,applyIdentity,queryEchoFromUrl,contextMatchesUrl,validateResult,makeEnvelope,fingerprintDocument,waitUntilReady};
 });
