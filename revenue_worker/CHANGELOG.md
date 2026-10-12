@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.3
+
+- Anuncia `trusted_click`: el Panel (≥ 0.40.1) le reserva los calendarios de VRBO, que solo se abren con un clic real (la extensión de Chrome no puede).
+
 ## 0.4.2
 
 - Lector ch1.1.2 (igual que la extensión 0.6.2): si ninguna habitación admite el grupo o el motor no tiene tarifas, la lectura queda parcial

@@ -514,7 +514,7 @@
     } catch (e) { return result('ERROR', { reason: 'reader_exception', error_detail: String(e && e.message || e).slice(0, 500), duration_ms: env.now() - t0, final_url: env.loc && env.loc.href }); }
   }
   /** Capacidades que anuncia el worker (claim.capabilities). */
-  function capabilities(opts) { const o = opts || {}; return { channels: o.direct === false ? ['airbnb', 'vrbo'] : ['airbnb', 'vrbo', 'direct'], direct_engines: SUPPORTED_DIRECT.slice(), channel_reader: VERSION }; }
+  function capabilities(opts) { const o = opts || {}; return { channels: o.direct === false ? ['airbnb', 'vrbo'] : ['airbnb', 'vrbo', 'direct'], direct_engines: SUPPORTED_DIRECT.slice(), channel_reader: VERSION, trusted_click: !!o.trustedClick }; } // trusted_click: el worker puede hacer clics reales (HA/Playwright) → recibe los calendarios de VRBO
 
   return { VERSION, READER_VERSION, SUPPORTED_DIRECT, run, capabilities, parseEuroAmount, totalsInText, classifyBlock, airbnbGlobalId, parseAirbnbCalendar, parseAirbnbBookIt, parseDayLabel, vrboDayState,
     parseVrboPriceSummary, vrboUnavailableText, vrboDayStateAria, parseAmenitizAvailability, parseAmenitizRooms, parseAviratoText, availroomIdsFromText, parseAvailroomV3, misterplanIdsFromText, parseMisterplanResult, parseAvaibookText, parseHbookStatus, parseThelisProducts, detectEngine, bookingLinks,

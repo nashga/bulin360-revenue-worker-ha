@@ -4,7 +4,7 @@ const puppeteer = require('puppeteer-core');
 const fs = require('fs');
 const path = require('path');
 
-const WORKER_VERSION = 'ha-0.4.2';
+const WORKER_VERSION = 'ha-0.4.3';
 const SOURCE_EXTENSION_VERSION = '0.5.0';
 const READER_VERSION = 'v14.1-worker+settle5s';
 const CHROME_BIN = process.env.CHROME_BIN || '/usr/bin/chromium-browser';
@@ -550,7 +550,7 @@ async function main() {
         lease_seconds: CONFIG.leaseSeconds,
         ext_version: WORKER_VERSION,
         reader_version: READER_VERSION,
-        ...(CONFIG.channels ? { capabilities: ChannelReader.capabilities({ direct: CONFIG.channelsDirect }) } : {}),
+        ...(CONFIG.channels ? { capabilities: ChannelReader.capabilities({ direct: CONFIG.channelsDirect, trustedClick: true }) } : {}),
       });
       if (claim.action === 'idle') {
         const retry = Math.max(2, Math.min(30, Number(claim.retry_after_seconds || CONFIG.claimRetrySeconds)));
