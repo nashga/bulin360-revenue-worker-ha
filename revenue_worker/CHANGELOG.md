@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.4.5
+- VRBO se abre en una sesión limpia (incógnito) en cada lectura: sin las cookies que VRBO marca como robot y que hacían salir «¿Eres un robot?» una y otra vez.
+
 ## 0.4.4
 - VRBO: apertura del calendario más robusta en equipos lentos (espera a que cargue la página, hasta 5 intentos con ratón o teclado).
 - Diagnóstico en el registro (`[vrbo] calendario …`) y en el Panel (motivo de las lecturas parciales).

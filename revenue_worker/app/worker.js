@@ -4,7 +4,7 @@ const puppeteer = require('puppeteer-core');
 const fs = require('fs');
 const path = require('path');
 
-const WORKER_VERSION = 'ha-0.4.4';
+const WORKER_VERSION = 'ha-0.4.5';
 const SOURCE_EXTENSION_VERSION = '0.5.0';
 const READER_VERSION = 'v14.1-worker+settle5s';
 const CHROME_BIN = process.env.CHROME_BIN || '/usr/bin/chromium-browser';
@@ -506,7 +506,9 @@ async function processChannelJob(browser, claim) {
   const job = claim.job; const attemptId = claim.attempt_id; const started = Date.now();
   log(`[canal ${job.id}]`, job.channel, job.engine || '', job.run_kind, job.competitor_name || '', job.checkin || job.range_from || '', '->', job.checkout || job.range_to || '');
   const hb = setInterval(() => api('heartbeat', { job_id: Number(job.id), job_kind: 'channel', lease_seconds: CONFIG.leaseSeconds, ext_version: WORKER_VERSION, reader_version: ChannelReader.READER_VERSION }).catch(() => {}), Math.max(30000, Math.floor(CONFIG.leaseSeconds * 500)));
-  const page = await browser.newPage(); let res;
+  // ha-0.4.5 · VRBO en una sesión limpia (contexto incógnito por trabajo): sin las cookies que VRBO marcó como robot en lecturas anteriores
+  const ctx = job.channel === 'vrbo' && typeof browser.createBrowserContext === 'function' ? await browser.createBrowserContext().catch(() => null) : null;
+  const page = await (ctx || browser).newPage(); let res;
   try {
     if (!/^https:\/\//i.test(String(job.url || ''))) res = { status: 'ERROR', reason: 'invalid_job_url' };
     else {
@@ -520,7 +522,7 @@ async function processChannelJob(browser, claim) {
       if (vdiag && res && res.status !== 'OK') res.error_detail = [res.error_detail, 'ha ' + JSON.stringify(vdiag)].filter(Boolean).join(' · ').slice(0, 900);
     }
   } catch (error) { res = { status: 'ERROR', reason: 'channel_exception', error_detail: String(error && error.message || error).slice(0, 300) }; }
-  finally { clearInterval(hb); await page.close().catch(() => {}); }
+  finally { clearInterval(hb); await page.close().catch(() => {}); if (ctx) await ctx.close().catch(() => {}); }
   const out = await api('result', Object.assign({}, res, { job_kind: 'channel', job_id: job.id, attempt_id: attemptId, ext_version: WORKER_VERSION, reader_version: ChannelReader.READER_VERSION, duration_ms: res.duration_ms || (Date.now() - started) }));
   log(`[canal ${job.id}] ${res.status}${res.reason ? ' (' + res.reason + ')' : ''}${out.channel_cooldown_until ? ' · canal en pausa hasta ' + out.channel_cooldown_until : ''}`);
   return { paused: false };
