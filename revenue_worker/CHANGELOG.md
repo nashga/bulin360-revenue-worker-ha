@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.2
+
+- Lector ch1.1.2 (igual que la extensión 0.6.2): si ninguna habitación admite el grupo o el motor no tiene tarifas, la lectura queda parcial
+  (no «sin disponibilidad»); MisterPlan distingue «el establecimiento está completo» de un error del propio motor.
+
 ## 0.4.1
 
 - VRBO solo abre su calendario con un clic real (un clic por script ya no lo abre): el worker lo hace con Playwright, rechazando antes las cookies, y el

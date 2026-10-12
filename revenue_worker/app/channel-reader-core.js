@@ -25,8 +25,8 @@
   else root.BulinChannelReader = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
-  const VERSION = '1.1.1';
-  const READER_VERSION = 'ch1.1.1';
+  const VERSION = '1.1.2';
+  const READER_VERSION = 'ch1.1.2';
   const AIRBNB_KEY = 'd306zoyjsyarp7ifhu67rjxn52tv0t20'; // clave pública de la web de Airbnb (también se lee de la página)
   const AIRBNB_CAL_HASH = 'bfd57b0552df2e8870f68d5cf501868a0e08417267469f55faefa78aca0234f4'; // respaldo si la página aún no lo ha pedido
   const ENGINES = {
@@ -179,7 +179,7 @@
       if (!opts.length) continue; units += r.units;
       const v = Math.min(...opts.map((o) => o.total)); if (best == null || v < best) best = v;
     }
-    return { total: best, rooms_available: units, rooms_listed: rooms.length, error_code: String(json.error_code ?? ''), error_msg: s(json.error_msg) };
+    return { total: best, rooms_available: units, rooms_listed: rooms.length, error_code: String(json.error_code ?? ''), error_msg: s(json.error_msg), full: /est[aá\ufffd]+ completo|no hay disponibilidad/i.test(htmlText(json.resultado)) };
   }
   /** Página de Avaibook (nueva_reserva.php) → total o sin disponibilidad. Solo vale la línea «Total» (no depósito, resto ni fianza). */
   function parseAvaibookText(text) {
@@ -393,7 +393,8 @@
     let j = null; try { j = await r.json(); } catch (e) { j = null; }
     const p = parseAmenitizRooms(j, job.guests); if (!p) return result('ESTRUCTURA_CAMBIADA', { reason: 'amenitiz_rooms_shape', error_detail: 'HTTP ' + r.status });
     const price = { checkin: job.checkin, checkout: job.checkout, guests: job.guests, currency: p.currency, rooms_available: p.rooms_available };
-    if (!p.total) return result('SIN_DISPONIBILIDAD', { reason: p.rooms_listed ? 'no_room_for_group' : 'no_rooms', price, final_url: env.loc.href });
+    if (!p.total && p.rooms_listed && !p.rooms_fit) return result('PARCIAL', { reason: 'no_room_for_group', price, final_url: env.loc.href }); // ch1.1.2 · grupo mayor que cualquier habitación: no es «cerrado»
+    if (!p.total) return result('SIN_DISPONIBILIDAD', { reason: 'no_rooms', price, final_url: env.loc.href });
     return result('OK', { price: Object.assign(price, { total: p.total }), final_url: env.loc.href });
   }
   async function aviratoPrice(job, env) {
@@ -424,7 +425,8 @@
     const r = await env.fetch(u, { headers: { Accept: 'application/json' } }); let j = null; try { j = await r.json(); } catch (e) { j = null; }
     const p = parseAvailroomV3(j, job.guests); if (!p) return result('ESTRUCTURA_CAMBIADA', { reason: 'availroom_shape', error_detail: 'HTTP ' + r.status, final_url: env.loc.href });
     const price = priceBase(job, { rooms_available: p.rooms_available });
-    if (!p.total) return result('SIN_DISPONIBILIDAD', { reason: p.no_rates ? 'no_rates_loaded' : (p.rooms_fit ? 'no_rooms' : 'no_room_for_group'), price, final_url: env.loc.href });
+    if (!p.total && (p.no_rates || (p.rooms_listed && !p.rooms_fit))) return result('PARCIAL', { reason: p.no_rates ? 'no_rates_loaded' : 'no_room_for_group', price, final_url: env.loc.href }); // sin tarifas o grupo demasiado grande: no es «cerrado»
+    if (!p.total) return result('SIN_DISPONIBILIDAD', { reason: 'no_rooms', price, final_url: env.loc.href });
     return result('OK', { price: Object.assign(price, { total: p.total }), final_url: env.loc.href });
   }
   function jsonpDefault(env, url, timeoutMs) {
@@ -444,7 +446,9 @@
     const j = await (env.jsonp ? env.jsonp(u) : jsonpDefault(env, u, 20000));
     const p = parseMisterplanResult(j, job.guests); if (!p) return result('ESTRUCTURA_CAMBIADA', { reason: 'misterplan_shape', error_detail: j ? 'sin resultado' : 'jsonp_timeout', final_url: env.loc.href });
     const price = priceBase(job, { rooms_available: p.rooms_available });
-    if (!p.total) return result('SIN_DISPONIBILIDAD', { reason: p.rooms_listed ? 'no_room_for_group' : 'no_rooms', error_detail: p.error_msg ? p.error_msg.slice(0, 200) : undefined, price, final_url: env.loc.href });
+    if (!p.total && p.rooms_listed) return result('PARCIAL', { reason: 'no_room_for_group', price, final_url: env.loc.href }); // hay habitaciones, ninguna para este grupo
+    if (!p.total && !p.full && /^ERROR/i.test(p.error_msg)) return result('ERROR', { reason: 'misterplan_engine_error', error_detail: p.error_msg.slice(0, 200), final_url: env.loc.href });
+    if (!p.total) return result('SIN_DISPONIBILIDAD', { reason: 'no_rooms', price, final_url: env.loc.href });
     return result('OK', { price: Object.assign(price, { total: p.total }), final_url: env.loc.href });
   }
   async function avaibookPrice(job, env) {
@@ -472,7 +476,8 @@
     await env.sleep(1500);
     const data = [...env.doc.querySelectorAll('.thr-search-product')].map((el) => { const cur = el.querySelector('.thr-promotion-description-thumbs-price') || el.querySelector('.thr-search-product-stay-price'); return { text: s(el.innerText || el.textContent), price: cur ? s(cur.innerText || cur.textContent) : null }; });
     const r = parseThelisProducts(data, job.guests); const price = priceBase(job, { rooms_available: r.rooms_available });
-    if (!r.total) return result('SIN_DISPONIBILIDAD', { reason: r.rooms_fit ? 'no_rooms' : 'no_room_for_group', price, final_url: env.loc.href });
+    if (!r.total && !r.rooms_fit && r.rooms_listed) return result('PARCIAL', { reason: 'no_room_for_group', price, final_url: env.loc.href });
+    if (!r.total) return result('SIN_DISPONIBILIDAD', { reason: 'no_rooms', price, final_url: env.loc.href });
     return result('OK', { price: Object.assign(price, { total: r.total }), final_url: env.loc.href });
   }
   async function probe(job, env) {
