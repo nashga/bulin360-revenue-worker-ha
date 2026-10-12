@@ -4,7 +4,7 @@ const puppeteer = require('puppeteer-core');
 const fs = require('fs');
 const path = require('path');
 
-const WORKER_VERSION = 'ha-0.4.3';
+const WORKER_VERSION = 'ha-0.4.4';
 const SOURCE_EXTENSION_VERSION = '0.5.0';
 const READER_VERSION = 'v14.1-worker+settle5s';
 const CHROME_BIN = process.env.CHROME_BIN || '/usr/bin/chromium-browser';
@@ -477,13 +477,29 @@ async function preparePage(page) {
  *  Un CAPTCHA en un canal no pausa el worker: el Panel enfría ese canal y el worker sigue con Booking y el resto. */
 /** ha-0.4.1 · VRBO solo abre su selector de fechas con un clic real: Playwright lo hace (rechazando antes las cookies) y el lector lee los días. */
 async function openVrboCalendar(page) {
+  // ha-0.4.4 · en equipos lentos el botón aparece antes de que la página responda: hasta 5 intentos en ~45 s (clic con ratón en el centro del botón,
+  // y si no, foco + Enter), esperando a que la página termine de cargar. Devuelve un diagnóstico corto para el Panel.
+  const diag = { opened: false, tries: 0, trigger: false, cookies: false };
   try {
-    const reject = await page.$('#onetrust-reject-all-handler'); if (reject && await reject.isVisible().catch(() => false)) { await reject.click().catch(() => {}); await sleep(800); }
+    const reject = await page.$('#onetrust-reject-all-handler'); if (reject && await reject.isVisible().catch(() => false)) { await reject.click().catch(() => {}); diag.cookies = true; await sleep(800); }
     const trigger = '[data-stid="uitk-date-selector-input1-default"]';
-    await page.waitForSelector(trigger, { timeout: 10000 });
-    for (let i = 0; i < 2; i++) { await page.click(trigger, { timeout: 5000 }).catch(() => {}); if (await page.waitForSelector('.uitk-day-button', { timeout: 6000 }).then(() => true).catch(() => false)) return true; }
-  } catch (e) { log('[vrbo] no se pudo abrir el calendario:', String(e && e.message || e).slice(0, 120)); }
-  return false;
+    diag.trigger = !!(await page.waitForSelector(trigger, { timeout: 15000 }).catch(() => null));
+    if (!diag.trigger) diag.opened = !!(await page.$('.uitk-day-button'));
+    if (diag.trigger) await page.waitForNetworkIdle({ idleTime: 800, timeout: 12000 }).catch(() => {});
+    for (let i = 0; diag.trigger && i < 5 && !diag.opened; i++) {
+      diag.tries = i + 1;
+      const el = await page.$(trigger); if (!el) break;
+      await el.evaluate((n) => n.scrollIntoView({ block: 'center' })).catch(() => {});
+      const box = await el.boundingBox().catch(() => null);
+      if (i % 2 === 0 && box) await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2).catch(() => {});
+      else { await el.focus().catch(() => {}); await page.keyboard.press('Enter').catch(() => {}); }
+      diag.opened = await page.waitForSelector('.uitk-day-button', { timeout: 7000 }).then(() => true).catch(() => false);
+      if (!diag.opened) await sleep(1500);
+    }
+  } catch (e) { diag.error = String(e && e.message || e).slice(0, 120); }
+  if (!diag.opened) diag.title = (await page.title().catch(() => '')).slice(0, 80);
+  log('[vrbo] calendario', JSON.stringify(diag));
+  return diag;
 }
 
 async function processChannelJob(browser, claim) {
@@ -499,13 +515,14 @@ async function processChannelJob(browser, claim) {
       await sleep(2500);
       const tag = await page.addScriptTag({ content: channelSource });
       await tag.evaluate((el) => el.remove()).catch(() => {}); // el lector queda cargado pero fuera del DOM (la sonda analiza el HTML de la web)
-      if (job.channel === 'vrbo' && job.run_kind === 'calendar') await openVrboCalendar(page);
+      const vdiag = job.channel === 'vrbo' && job.run_kind === 'calendar' ? await openVrboCalendar(page) : null;
       res = await page.evaluate((j) => globalThis.BulinChannelReader.run(j), job);
+      if (vdiag && res && res.status !== 'OK') res.error_detail = [res.error_detail, 'ha ' + JSON.stringify(vdiag)].filter(Boolean).join(' · ').slice(0, 900);
     }
   } catch (error) { res = { status: 'ERROR', reason: 'channel_exception', error_detail: String(error && error.message || error).slice(0, 300) }; }
   finally { clearInterval(hb); await page.close().catch(() => {}); }
   const out = await api('result', Object.assign({}, res, { job_kind: 'channel', job_id: job.id, attempt_id: attemptId, ext_version: WORKER_VERSION, reader_version: ChannelReader.READER_VERSION, duration_ms: res.duration_ms || (Date.now() - started) }));
-  log(`[canal ${job.id}] ${res.status}${out.channel_cooldown_until ? ' · canal en pausa hasta ' + out.channel_cooldown_until : ''}`);
+  log(`[canal ${job.id}] ${res.status}${res.reason ? ' (' + res.reason + ')' : ''}${out.channel_cooldown_until ? ' · canal en pausa hasta ' + out.channel_cooldown_until : ''}`);
   return { paused: false };
 }
 

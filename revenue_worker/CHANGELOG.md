@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.4
+- VRBO: apertura del calendario más robusta en equipos lentos (espera a que cargue la página, hasta 5 intentos con ratón o teclado).
+- Diagnóstico en el registro (`[vrbo] calendario …`) y en el Panel (motivo de las lecturas parciales).
+
 ## 0.4.3
 
 - Anuncia `trusted_click`: el Panel (≥ 0.40.1) le reserva los calendarios de VRBO, que solo se abren con un clic real (la extensión de Chrome no puede).
