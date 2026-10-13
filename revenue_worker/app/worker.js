@@ -4,7 +4,7 @@ const puppeteer = require('puppeteer-core');
 const fs = require('fs');
 const path = require('path');
 
-const WORKER_VERSION = 'ha-0.4.5';
+const WORKER_VERSION = 'ha-0.4.6';
 const SOURCE_EXTENSION_VERSION = '0.5.0';
 const READER_VERSION = 'v14.1-worker+settle5s';
 const CHROME_BIN = process.env.CHROME_BIN || '/usr/bin/chromium-browser';
@@ -476,28 +476,58 @@ async function preparePage(page) {
 /** Trabajo de canal (M18): abre la URL del trabajo, inyecta el lector de canales y envía el resultado con job_kind channel.
  *  Un CAPTCHA en un canal no pausa el worker: el Panel enfría ese canal y el worker sigue con Booking y el resto. */
 /** ha-0.4.1 · VRBO solo abre su selector de fechas con un clic real: Playwright lo hace (rechazando antes las cookies) y el lector lee los días. */
-async function openVrboCalendar(page) {
-  // ha-0.4.4 · en equipos lentos el botón aparece antes de que la página responda: hasta 5 intentos en ~45 s (clic con ratón en el centro del botón,
-  // y si no, foco + Enter), esperando a que la página termine de cargar. Devuelve un diagnóstico corto para el Panel.
-  const diag = { opened: false, tries: 0, trigger: false, cookies: false };
-  try {
+async function openVrboCalendar(page, job) {
+  // ha-0.4.6 · en HA el botón de fechas a veces no llega a pintarse (trigger:false con el título bien): se recorre la página para que VRBO
+  // monte sus módulos perezosos, se busca el botón por varios caminos (data-stid/testid, aria-label «Desde…», texto «Añadir fechas») durante ~30 s
+  // y, si no aparece, se vuelve a abrir el anuncio SIN fechas en la URL y se repite. Diagnóstico con lo que había en la página.
+  const diag = { opened: false, tries: 0, trigger: false, cookies: false, nodates: false };
+  const findTrigger = () => page.evaluate(() => {
+    const sel = ['[data-stid="uitk-date-selector-input1-default"]', '[data-testid="uitk-date-selector-input1-default"]', '[data-stid="open-date-picker"]', '[data-stid*="date-selector"] button', 'button[data-stid*="date"]'];
+    let el = null; for (const q of sel) { el = document.querySelector(q); if (el) break; }
+    if (!el) el = [...document.querySelectorAll('button')].find((b) => /^(desde|llegada|entrada|check-?in|fecha)/i.test((b.getAttribute('aria-label') || '').trim()) || /^(añadir fechas|comprobar disponibilidad|elige las fechas|selecciona las fechas)/i.test((b.innerText || '').trim()));
+    if (!el) return null;
+    el.setAttribute('data-b360-trigger', '1'); return true;
+  }).catch(() => null);
+  const hydrate = async () => {
+    await page.evaluate(async () => { const h = document.body ? document.body.scrollHeight : 0; for (let y = 0; y < h; y += 700) { window.scrollTo(0, y); await new Promise((r) => setTimeout(r, 250)); } window.scrollTo(0, 0); }).catch(() => {});
+  };
+  const attempt = async () => {
     const reject = await page.$('#onetrust-reject-all-handler'); if (reject && await reject.isVisible().catch(() => false)) { await reject.click().catch(() => {}); diag.cookies = true; await sleep(800); }
-    const trigger = '[data-stid="uitk-date-selector-input1-default"]';
-    diag.trigger = !!(await page.waitForSelector(trigger, { timeout: 15000 }).catch(() => null));
-    if (!diag.trigger) diag.opened = !!(await page.$('.uitk-day-button'));
-    if (diag.trigger) await page.waitForNetworkIdle({ idleTime: 800, timeout: 12000 }).catch(() => {});
+    await page.waitForNetworkIdle({ idleTime: 800, timeout: 12000 }).catch(() => {});
+    await hydrate();
+    for (let w = 0; w < 30 && !diag.trigger; w++) { diag.trigger = !!(await findTrigger()); if (!diag.trigger) { if (await page.$('.uitk-day-button')) { diag.opened = true; return; } await sleep(1000); if (w === 10) await hydrate(); } }
     for (let i = 0; diag.trigger && i < 5 && !diag.opened; i++) {
-      diag.tries = i + 1;
-      const el = await page.$(trigger); if (!el) break;
+      diag.tries++;
+      const el = await page.$('[data-b360-trigger="1"]'); if (!el) break;
       await el.evaluate((n) => n.scrollIntoView({ block: 'center' })).catch(() => {});
+      await sleep(400);
       const box = await el.boundingBox().catch(() => null);
       if (i % 2 === 0 && box) await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2).catch(() => {});
       else { await el.focus().catch(() => {}); await page.keyboard.press('Enter').catch(() => {}); }
       diag.opened = await page.waitForSelector('.uitk-day-button', { timeout: 7000 }).then(() => true).catch(() => false);
       if (!diag.opened) await sleep(1500);
     }
+  };
+  try {
+    await attempt();
+    if (!diag.opened && !diag.trigger && /[?&](chkin|startDate)=/.test(page.url())) {
+      // sin botón con fechas en la URL: el anuncio limpio (sin fechas) muestra «Añadir fechas»
+      const u = new URL(page.url()); ['chkin', 'chkout', 'startDate', 'endDate', 'pwaDialog'].forEach((k) => u.searchParams.delete(k));
+      diag.nodates = true;
+      await page.goto(u.toString(), { waitUntil: 'domcontentloaded', timeout: CONFIG.navigationTimeoutMs }).catch(() => {});
+      await sleep(2500);
+      const tag = await page.addScriptTag({ content: channelSource }).catch(() => null); if (tag) await tag.evaluate((el) => el.remove()).catch(() => {});
+      await attempt();
+    }
   } catch (e) { diag.error = String(e && e.message || e).slice(0, 120); }
-  if (!diag.opened) diag.title = (await page.title().catch(() => '')).slice(0, 80);
+  if (!diag.opened) {
+    diag.title = (await page.title().catch(() => '')).slice(0, 80);
+    diag.seen = await page.evaluate(() => ({
+      stids: [...new Set([...document.querySelectorAll('[data-stid]')].map((e) => e.getAttribute('data-stid')))].filter((x) => /date|picker|book|price|avail/i.test(x)).slice(0, 8),
+      btns: [...document.querySelectorAll('button')].map((b) => ((b.getAttribute('aria-label') || b.innerText || '').trim()).slice(0, 30)).filter(Boolean).slice(0, 12),
+      w: window.innerWidth, h: document.body ? document.body.scrollHeight : 0,
+    })).catch(() => null);
+  }
   log('[vrbo] calendario', JSON.stringify(diag));
   return diag;
 }
@@ -517,9 +547,9 @@ async function processChannelJob(browser, claim) {
       await sleep(2500);
       const tag = await page.addScriptTag({ content: channelSource });
       await tag.evaluate((el) => el.remove()).catch(() => {}); // el lector queda cargado pero fuera del DOM (la sonda analiza el HTML de la web)
-      const vdiag = job.channel === 'vrbo' && job.run_kind === 'calendar' ? await openVrboCalendar(page) : null;
+      const vdiag = job.channel === 'vrbo' && job.run_kind === 'calendar' ? await openVrboCalendar(page, job) : null;
       res = await page.evaluate((j) => globalThis.BulinChannelReader.run(j), job);
-      if (vdiag && res && res.status !== 'OK') res.error_detail = [res.error_detail, 'ha ' + JSON.stringify(vdiag)].filter(Boolean).join(' · ').slice(0, 900);
+      if (vdiag && res && res.status !== 'OK') res.error_detail = [res.error_detail, 'ha ' + JSON.stringify(vdiag)].filter(Boolean).join(' · ').slice(0, 1500);
     }
   } catch (error) { res = { status: 'ERROR', reason: 'channel_exception', error_detail: String(error && error.message || error).slice(0, 300) }; }
   finally { clearInterval(hb); await page.close().catch(() => {}); if (ctx) await ctx.close().catch(() => {}); }

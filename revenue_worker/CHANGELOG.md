@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.6
+- VRBO: si el botón de fechas no aparece (pasaba ya sin captcha: título del anuncio bien pero sin selector), se recorre la página para que VRBO monte sus módulos, se busca el botón por varios caminos durante ~30 s y, si sigue sin salir, se reabre el anuncio sin fechas en la URL y se repite.
+- El diagnóstico incluye qué botones y módulos había en la página cuando no se abre.
+
 ## 0.4.5
 - VRBO se abre en una sesión limpia (incógnito) en cada lectura: sin las cookies que VRBO marca como robot y que hacían salir «¿Eres un robot?» una y otra vez.
 
