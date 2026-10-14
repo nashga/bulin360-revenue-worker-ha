@@ -25,16 +25,16 @@
   else root.BulinChannelReader = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
-  const VERSION = '1.1.2';
-  const READER_VERSION = 'ch1.1.2';
+  const VERSION = '1.2.0';
+  const READER_VERSION = 'ch1.2.0';
   const AIRBNB_KEY = 'd306zoyjsyarp7ifhu67rjxn52tv0t20'; // clave pública de la web de Airbnb (también se lee de la página)
   const AIRBNB_CAL_HASH = 'bfd57b0552df2e8870f68d5cf501868a0e08417267469f55faefa78aca0234f4'; // respaldo si la página aún no lo ha pedido
   const ENGINES = {
     avirato: ['avirato.com', 'avirato.es'], availroom: ['availroom.com', 'availroom.es'], misterplan: ['misterplan.es', 'misterplan.com', 'reservaonline.support', 'mrplan.io'],
     avaibook: ['avaibook.com', 'avaibook.net', 'avaibook.es'], amenitiz: ['amenitiz.io', 'amenitiz.com', 'amenitiz.net'], lodgify: ['lodgify.com'], smoobu: ['smoobu.com'], beds24: ['beds24.com'],
-    octorate: ['octorate.com'], thelis: ['thelisresa.webcamp.fr', 'thelis.fr'], cloudbeds: ['cloudbeds.com'], roomcloud: ['roomcloud.net'], neobookings: ['neobookings.com'], mirai: ['mirai.com'], siteminder: ['thebookingbutton.com', 'siteminder.com'], hotetec: ['hotetec.com'],
+    octorate: ['octorate.com'], thelis: ['thelisresa.webcamp.fr', 'thelis.fr'], cloudbeds: ['cloudbeds.com'], roomcloud: ['roomcloud.net'], neobookings: ['neobookings.com'], mirai: ['mirai.com'], siteminder: ['thebookingbutton.com', 'thebookingbutton.co.uk', 'thebookingbutton.com.au', 'direct-book.com', 'siteminder.com'], hotetec: ['hotetec.com'],
   };
-  const SUPPORTED_DIRECT = ['amenitiz', 'avirato', 'availroom', 'misterplan', 'avaibook', 'hbook', 'thelis'];
+  const SUPPORTED_DIRECT = ['amenitiz', 'avirato', 'availroom', 'misterplan', 'avaibook', 'hbook', 'thelis', 'siteminder', 'roomcloud', 'pinpoint']; // ch1.2.0 · SiteMinder, RoomCloud y Pinpoint
   /** Enlaces a la web comercial del motor (pie «Software de reservas …») no son firma: solo cuentan recursos o enlaces al motor en sí. */
   const MARKETING_PATH = /^\/(?:[a-z]{2}(?:-[a-z]{2})?\/?)?$/i;
   const MONTHS = { enero: 1, febrero: 2, marzo: 3, abril: 4, mayo: 5, junio: 6, julio: 7, agosto: 8, septiembre: 9, setiembre: 9, octubre: 10, noviembre: 11, diciembre: 12,
@@ -215,6 +215,61 @@
     }
     return { total: best, rooms_available: units, rooms_listed: items.length, rooms_fit: fit };
   }
+  /**
+   * ch1.2.0 · SiteMinder (direct-book.com): habitaciones [{capacity, unavailable, rates:[{price, max_guests}]}] → tarifa más baja para el grupo.
+   * El precio de cada tarifa ya es el total de la estancia.
+   */
+  function parseSiteminderRooms(rooms, guests) {
+    if (!Array.isArray(rooms)) return null; const g = Number(guests) || 1; let best = null; let units = 0; let fit = 0;
+    for (const r of rooms) {
+      const cap = Number(r.capacity) || null; if (cap && cap < g) continue; fit++;
+      let any = false;
+      for (const rt of Array.isArray(r.rates) ? r.rates : []) {
+        const mg = Number(rt.max_guests) || null; if (mg && mg < g) continue;
+        const v = typeof rt.price === 'number' ? rt.price : parseEuroAmount(rt.price); if (!v) continue; any = true; if (best == null || v < best) best = v;
+      }
+      if (any) units++;
+    }
+    return { total: best, rooms_available: units, rooms_listed: rooms.length, rooms_fit: fit };
+  }
+  /**
+   * ch1.2.0 · RoomCloud (hotel.jsp): texto de la página → habitaciones «Max N … desde X €/Noche … K disponible».
+   * Solo publica el precio por noche desde el que parte: total = noches × el más bajo que admite al grupo.
+   */
+  function parseRoomcloudText(text, guests, nightsN) {
+    const t = s(text); if (!t) return null;
+    if (/NO HAY HABITACIONES DISPONIBLES|no hay disponibilidad para el per[ií]odo|NO ROOMS AVAILABLE/i.test(t)) return { unavailable: true, rooms_listed: 0 };
+    const g = Number(guests) || 1; const n = Number(nightsN) || 1; let best = null; let units = 0; let listed = 0; let fit = 0;
+    for (const ch of t.split(/INFORMACI[ÓO]N Y RESERVA|INFORMATION AND BOOKING/i)) {
+      const max = ch.match(/\bMax\s+(\d{1,2})\b/i); const from = ch.match(/desde\s+([\d.,]+)\s*€\s*\/\s*Noche|from\s+([\d.,]+)\s*€\s*\/\s*night/i); if (!max && !from) continue; listed++;
+      if (max && Number(max[1]) < g) continue; fit++; if (!from) continue;
+      const v = parseEuroAmount((from[1] || from[2]) + ' €'); if (!v) continue;
+      const k = ch.match(/(\d+)\s+disponibles?|(\d+)\s+available/i); units += k ? Number(k[1] || k[2]) : 1;
+      const tot = Math.round(v * n * 100) / 100; if (best == null || tot < best) best = tot;
+    }
+    return { total: best, rooms_available: units, rooms_listed: listed, rooms_fit: fit, nightly_basis: true };
+  }
+  /** ch1.2.0 · Pinpoint Booking System: respuesta de dopbsp_calendar_schedule_get ({fecha: JSON}) → días del calendario. */
+  function parsePinpointSchedule(schedule, from, to) {
+    if (!schedule || typeof schedule !== 'object') return null; const out = [];
+    for (let d = from; d <= to; d = addDays(d, 1)) {
+      let v = schedule[d]; if (v == null) continue; if (typeof v === 'string') { try { v = JSON.parse(v); } catch (e) { continue; } }
+      const st = String(v.status || ''); const free = Number(v.available) || 0;
+      const open = (st === 'available' || st === 'special') && free > 0;
+      const price = Number(v.promo) > 0 ? Number(v.promo) : (Number(v.price) > 0 ? Number(v.price) : null);
+      if (st === 'none' && !price) continue; // sin datos ese día
+      out.push({ date: d, available: open, checkin: open, checkout: true, min_nights: null, price: open ? price : null, units_free: open ? free : 0 });
+      if (out.length > 800) break;
+    }
+    return out;
+  }
+  /** Estancia a partir de los días de Pinpoint: todas las noches libres → suma de precios; alguna ocupada → sin disponibilidad. */
+  function pinpointStay(days, checkin, checkout) {
+    const by = {}; for (const d of days || []) by[d.date] = d; let total = 0; let missing = 0;
+    for (let d = checkin; d < checkout; d = addDays(d, 1)) { const x = by[d]; if (!x) { missing++; continue; } if (!x.available) return { unavailable: true }; if (x.price) total += x.price; else missing++; }
+    if (missing) return { unknown: true, missing };
+    return { total: Math.round(total * 100) / 100 };
+  }
   /** Motor de reservas a partir del HTML y la URL de la web del competidor. */
   function detectEngine(html, pageUrl) {
     // El propio lector puede estar en el DOM como <script> (Home Assistant lo inyecta con addScriptTag): nunca cuenta como firma.
@@ -233,6 +288,7 @@
     if (/hb_status_days_all|\/wp-content\/plugins\/hbook\//i.test(h)) { score.hbook = (score.hbook || 0) + 3; first.hbook = first.hbook || pageUrl || ''; }
     const ar = availroomIdsFromText(h); if (ar) { score.availroom = (score.availroom || 0) + 2; first.availroom = 'https://bookingengine.availroom.com/?environment=' + ar.environment + '&approute=property/' + ar.property; }
     if (/TExpReverseInc\.php|core_search\/lib\/accion\.TSimpleSearch/i.test(h)) score.misterplan = (score.misterplan || 0) + 2;
+    if (/DOPBSPCalendar|\/plugins\/booking-system\/|dopbsp_/.test(h)) { score.pinpoint = (score.pinpoint || 0) + 3; first.pinpoint = first.pinpoint || pageUrl || ''; }
     if (/cloudinary-cloud-name["']\s+content=["']amenitiz|desarrollado con amenitiz|powered by amenitiz|api_public\/v1\/client_booking_engine/i.test(h)) {
       score.amenitiz = (score.amenitiz || 0) + 3;
       const lang = (links.find((u) => origin && u.startsWith(origin) && /\/[a-z]{2}\/booking\/room/.test(u)) || '').match(/\/([a-z]{2})\/booking\/room/);
@@ -480,6 +536,70 @@
     if (!r.total) return result('SIN_DISPONIBILIDAD', { reason: 'no_rooms', price, final_url: env.loc.href });
     return result('OK', { price: Object.assign(price, { total: r.total }), final_url: env.loc.href });
   }
+  /* ── Motores directos ch1.2.0 (en la página) ── */
+  /** SiteMinder: la URL ya lleva fechas y adultos (direct-book.com/properties/<code>?checkInDate…); se leen las tarjetas de habitación. */
+  function siteminderRoomsFromDom(env) {
+    return [...env.doc.querySelectorAll('.content-box.room-type')].map((card) => ({
+      name: s((card.querySelector('h2,h3') || {}).textContent).slice(0, 120),
+      capacity: Number((String(card.innerText || card.textContent || '').match(/(?:Capacidad para|Sleeps|Capacity)\s+(\d{1,2})/i) || [])[1]) || null,
+      rates: [...card.querySelectorAll('.room-rate-wrapper .wrapper')].map((w) => ({ price: s((w.querySelector('.price--now') || {}).textContent), max_guests: Number((String(w.innerText || w.textContent || '').match(/(\d{1,2})\s+(?:hu[ée]sped(?:es)?|guests?)\s+(?:como m[aá]ximo|max)/i) || [])[1]) || null })).filter((x) => x.price) }));
+  }
+  async function siteminderPrice(job, env) {
+    const p = qp(env); if (p.get('checkInDate') !== job.checkin || p.get('checkOutDate') !== job.checkout) return result('INCONSISTENTE', { reason: 'context_mismatch', error_detail: 'url_params' });
+    const NONE = /no tiene disponibilidad durante las fechas|no availability for (?:the|your) (?:selected )?dates|property has no availability/i;
+    const read = await waitFor(env, () => { if (NONE.test(bodyText(env))) return { none: true }; const rooms = siteminderRoomsFromDom(env); return rooms.some((r) => r.rates.length) ? { rooms } : null; }, 25000, 800);
+    const price = priceBase(job, {});
+    if (!read) { const rooms = env.doc.querySelectorAll('.content-box.room-type').length; if (rooms) return result('SIN_DISPONIBILIDAD', { reason: 'no_rooms', price: Object.assign(price, { rooms_available: 0 }), final_url: env.loc.href }); return result('ESTRUCTURA_CAMBIADA', { reason: 'siteminder_rooms_not_found', error_detail: pageHint(env), final_url: env.loc.href }); }
+    if (read.none) return result('SIN_DISPONIBILIDAD', { reason: 'no_rooms', price: Object.assign(price, { rooms_available: 0 }), final_url: env.loc.href });
+    const r = parseSiteminderRooms(read.rooms, job.guests); price.rooms_available = r.rooms_available;
+    if (!r.total && r.rooms_listed && !r.rooms_fit) return result('PARCIAL', { reason: 'no_room_for_group', price, final_url: env.loc.href });
+    if (!r.total) return result('SIN_DISPONIBILIDAD', { reason: 'no_rooms', price, final_url: env.loc.href });
+    return result('OK', { price: Object.assign(price, { total: r.total }), final_url: env.loc.href });
+  }
+  /** RoomCloud: hotel.jsp?hotel=…&checkin=AAAAMMDD&checkout=AAAAMMDD&adults=N; la página trae «desde X €/Noche» por habitación. */
+  async function roomcloudPrice(job, env) {
+    const p = qp(env); const ymd = (d) => String(d || '').replace(/-/g, '');
+    if (p.get('checkin') !== ymd(job.checkin) || p.get('checkout') !== ymd(job.checkout)) return result('INCONSISTENTE', { reason: 'context_mismatch', error_detail: 'url_params' });
+    const n = nights(job.checkin, job.checkout);
+    const read = await waitFor(env, () => { const r = parseRoomcloudText(bodyText(env), job.guests, n); return r && (r.unavailable || r.rooms_listed) ? r : null; }, 20000, 800);
+    const price = priceBase(job, {});
+    if (!read) return result('ESTRUCTURA_CAMBIADA', { reason: 'roomcloud_rooms_not_found', error_detail: pageHint(env), final_url: env.loc.href });
+    if (read.unavailable) return result('SIN_DISPONIBILIDAD', { reason: 'no_rooms', price: Object.assign(price, { rooms_available: 0 }), final_url: env.loc.href });
+    price.rooms_available = read.rooms_available;
+    if (!read.total && !read.rooms_fit) return result('PARCIAL', { reason: 'no_room_for_group', price, final_url: env.loc.href });
+    if (!read.total) return result('SIN_DISPONIBILIDAD', { reason: 'no_rooms', price, final_url: env.loc.href });
+    return result('OK', { price: Object.assign(price, { total: read.total, price_basis: 'nightly_from' }), final_url: env.loc.href });
+  }
+  /** Pinpoint: id del calendario (engine_params, DOM #DOPBSPCalendarN o días «N_AAAA-MM-DD») y admin-ajax del propio WordPress. */
+  function pinpointCalendarId(job, env) {
+    const pre = job.engine_params && job.engine_params.calendar; if (pre) return String(pre);
+    const el = env.doc && env.doc.querySelector('[id^="DOPBSPCalendar"]'); const m = el && el.id.match(/DOPBSPCalendar(\d+)/); if (m) return m[1];
+    const day = env.doc && env.doc.querySelector('.DOPBSPCalendar-day[id]'); const m2 = day && day.id.match(/^(\d+)_\d{4}-/); return m2 ? m2[1] : null;
+  }
+  async function pinpointSchedule(job, env, from, to) {
+    const id = await waitFor(env, () => pinpointCalendarId(job, env), 12000, 600); if (!id) return { error: 'pinpoint_calendar_not_found' };
+    const ajax = (env.win && env.win.DOPBSPFrontEnd && env.win.DOPBSPFrontEnd.ajaxURL) || (env.loc.origin + '/wp-admin/admin-ajax.php');
+    let days = []; let first = true;
+    for (let y = Number(from.slice(0, 4)); y <= Number(to.slice(0, 4)); y++) {
+      const body = new URLSearchParams({ action: 'dopbsp_calendar_schedule_get', dopbsp_frontend_ajax_request: 'true', id, year: String(y), firstYear: first ? '"true"' : '"false"' }); first = false;
+      const r = await env.fetch(ajax, { method: 'POST', body, credentials: 'include', headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' } });
+      const t = String(await r.text()).trim(); if (!t) continue; let j = null; try { j = JSON.parse(t); } catch (e) { return { error: 'pinpoint_schedule_shape', detail: 'HTTP ' + r.status }; }
+      const part = parsePinpointSchedule(j, [from, y + '-01-01'].sort()[1], [to, y + '-12-31'].sort()[0]); if (part) days = days.concat(part);
+    }
+    return { days };
+  }
+  async function pinpointCalendar(job, env) {
+    const from = job.range_from || new Date().toISOString().slice(0, 10); const to = job.range_to || addDays(from, 365);
+    const r = await pinpointSchedule(job, env, from, to); if (r.error) return result('ESTRUCTURA_CAMBIADA', { reason: r.error, error_detail: r.detail || pageHint(env), final_url: env.loc.href });
+    return result('OK', { calendar: r.days, currency: 'EUR', final_url: env.loc.href });
+  }
+  async function pinpointPrice(job, env) {
+    const r = await pinpointSchedule(job, env, job.checkin, addDays(job.checkout, -1)); if (r.error) return result('ESTRUCTURA_CAMBIADA', { reason: r.error, error_detail: r.detail || pageHint(env), final_url: env.loc.href });
+    const st = pinpointStay(r.days, job.checkin, job.checkout); const price = priceBase(job, {});
+    if (st.unavailable) return result('SIN_DISPONIBILIDAD', { reason: 'dates_not_available', price: Object.assign(price, { rooms_available: 0 }), final_url: env.loc.href });
+    if (st.unknown) return result('PARCIAL', { reason: 'pinpoint_days_without_price', error_detail: st.missing + ' noches sin dato', price, final_url: env.loc.href });
+    return result('OK', { price: Object.assign(price, { total: st.total, rooms_available: 1 }), final_url: env.loc.href });
+  }
   async function probe(job, env) {
     const html = env.doc && env.doc.documentElement ? env.doc.documentElement.outerHTML : '';
     let det = detectEngine(html, env.loc.href);
@@ -508,6 +628,9 @@
       else if (ch === 'direct' && eng === 'avaibook' && k === 'price') r = await avaibookPrice(job, env);
       else if (ch === 'direct' && eng === 'hbook' && k === 'calendar') r = await hbookCalendar(job, env);
       else if (ch === 'direct' && eng === 'thelis' && k === 'price') r = await thelisPrice(job, env);
+      else if (ch === 'direct' && eng === 'siteminder' && k === 'price') r = await siteminderPrice(job, env);
+      else if (ch === 'direct' && eng === 'roomcloud' && k === 'price') r = await roomcloudPrice(job, env);
+      else if (ch === 'direct' && eng === 'pinpoint') r = k === 'calendar' ? await pinpointCalendar(job, env) : await pinpointPrice(job, env);
       else r = result('ERROR', { reason: 'unsupported_' + ch + '_' + (eng || '') + '_' + k });
       const b2 = r.status !== 'OK' ? blocked(env) : null; if (b2) r = result(b2.status, { reason: b2.reason, final_url: env.loc.href });
       r.duration_ms = env.now() - t0; return r;
@@ -517,6 +640,6 @@
   function capabilities(opts) { const o = opts || {}; return { channels: o.direct === false ? ['airbnb', 'vrbo'] : ['airbnb', 'vrbo', 'direct'], direct_engines: SUPPORTED_DIRECT.slice(), channel_reader: VERSION, trusted_click: !!o.trustedClick }; } // trusted_click: el worker puede hacer clics reales (HA/Playwright) → recibe los calendarios de VRBO
 
   return { VERSION, READER_VERSION, SUPPORTED_DIRECT, run, capabilities, parseEuroAmount, totalsInText, classifyBlock, airbnbGlobalId, parseAirbnbCalendar, parseAirbnbBookIt, parseDayLabel, vrboDayState,
-    parseVrboPriceSummary, vrboUnavailableText, vrboDayStateAria, parseAmenitizAvailability, parseAmenitizRooms, parseAviratoText, availroomIdsFromText, parseAvailroomV3, misterplanIdsFromText, parseMisterplanResult, parseAvaibookText, parseHbookStatus, parseThelisProducts, detectEngine, bookingLinks,
-    _internal: { availroomPrice, misterplanPrice, avaibookPrice, hbookCalendar, thelisPrice, dismissConsent, airbnbCalendar, airbnbPrice, airbnbStayFromCalendar, vrboPrice, amenitizCalendar, amenitizPrice, aviratoPrice, probe, addDays } };
+    parseVrboPriceSummary, vrboUnavailableText, vrboDayStateAria, parseAmenitizAvailability, parseAmenitizRooms, parseAviratoText, availroomIdsFromText, parseAvailroomV3, misterplanIdsFromText, parseMisterplanResult, parseAvaibookText, parseHbookStatus, parseSiteminderRooms, parseRoomcloudText, parsePinpointSchedule, pinpointStay, parseThelisProducts, detectEngine, bookingLinks,
+    _internal: { siteminderPrice, roomcloudPrice, pinpointCalendar, pinpointPrice, availroomPrice, misterplanPrice, avaibookPrice, hbookCalendar, thelisPrice, dismissConsent, airbnbCalendar, airbnbPrice, airbnbStayFromCalendar, vrboPrice, amenitizCalendar, amenitizPrice, aviratoPrice, probe, addDays } };
 });

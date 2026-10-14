@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.7
+- Lector ch1.2.0: tres motores directos nuevos.
+  - SiteMinder (direct-book.com / thebookingbutton): precio por estancia leyendo las habitaciones y tarifas de la página con fechas y adultos.
+  - RoomCloud (booking.roomcloud.net): precio por estancia a partir del «desde X €/Noche» de cada habitación (× noches).
+  - Pinpoint Booking System (WordPress): calendario completo y precio por estancia desde el propio calendario de la web.
+- Requiere el Panel 0.42.2 para recibir estos trabajos.
+
 ## 0.4.6
 - VRBO: si el botón de fechas no aparece (pasaba ya sin captcha: título del anuncio bien pero sin selector), se recorre la página para que VRBO monte sus módulos, se busca el botón por varios caminos durante ~30 s y, si sigue sin salir, se reabre el anuncio sin fechas en la URL y se repite.
 - El diagnóstico incluye qué botones y módulos había en la página cuando no se abre.
