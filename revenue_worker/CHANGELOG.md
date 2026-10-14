@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.4.8
+- Corrige «Cannot read properties of undefined (reading 'run')» en Airbnb y otras webs: el lector de canales se carga por el propio navegador en cada página (también tras redirecciones y con CSP estricta) y se comprueba justo antes de leer.
+
 ## 0.4.7
 - Lector ch1.2.0: tres motores directos nuevos.
   - SiteMinder (direct-book.com / thebookingbutton): precio por estancia leyendo las habitaciones y tarifas de la página con fechas y adultos.

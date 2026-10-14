@@ -4,7 +4,7 @@ const puppeteer = require('puppeteer-core');
 const fs = require('fs');
 const path = require('path');
 
-const WORKER_VERSION = 'ha-0.4.7';
+const WORKER_VERSION = 'ha-0.4.8';
 const SOURCE_EXTENSION_VERSION = '0.5.0';
 const READER_VERSION = 'v14.1-worker+settle5s';
 const CHROME_BIN = process.env.CHROME_BIN || '/usr/bin/chromium-browser';
@@ -516,7 +516,7 @@ async function openVrboCalendar(page, job) {
       diag.nodates = true;
       await page.goto(u.toString(), { waitUntil: 'domcontentloaded', timeout: CONFIG.navigationTimeoutMs }).catch(() => {});
       await sleep(2500);
-      const tag = await page.addScriptTag({ content: channelSource }).catch(() => null); if (tag) await tag.evaluate((el) => el.remove()).catch(() => {});
+      await ensureChannelReader(page);
       await attempt();
     }
   } catch (e) { diag.error = String(e && e.message || e).slice(0, 120); }
@@ -532,6 +532,30 @@ async function openVrboCalendar(page, job) {
   return diag;
 }
 
+/**
+ * ha-0.4.8 · el lector de canales se carga por CDP (no con <script> en la página): las webs con CSP estricta (Airbnb) o que se
+ * redirigen tras cargar dejaban globalThis.BulinChannelReader sin definir («Cannot read properties of undefined (reading 'run')»).
+ * evaluateOnNewDocument lo deja en cada documento nuevo y ensureChannelReader lo vuelve a cargar si falta justo antes de usarlo.
+ */
+async function ensureChannelReader(page) {
+  for (let i = 0; i < 3; i++) {
+    try {
+      const has = await page.evaluate(() => !!(globalThis.BulinChannelReader && globalThis.BulinChannelReader.run));
+      if (has) return true;
+      await page.evaluate(channelSource);
+    } catch (e) { await sleep(800); } // contexto destruido por una navegación: se espera y se reintenta
+  }
+  return page.evaluate(() => !!(globalThis.BulinChannelReader && globalThis.BulinChannelReader.run)).catch(() => false);
+}
+async function runChannelReader(page, job) {
+  for (let i = 0; i < 2; i++) {
+    if (!(await ensureChannelReader(page))) { await sleep(1500); continue; }
+    try { return await page.evaluate((j) => globalThis.BulinChannelReader.run(j), job); }
+    catch (e) { if (i === 1 || !/context was destroyed|reading 'run'|Cannot find context/i.test(String(e && e.message || e))) throw e; await sleep(2000); }
+  }
+  return { status: 'ERROR', reason: 'reader_not_loaded', error_detail: 'No se pudo cargar el lector en ' + String(page.url()).slice(0, 200) };
+}
+
 async function processChannelJob(browser, claim) {
   const job = claim.job; const attemptId = claim.attempt_id; const started = Date.now();
   log(`[canal ${job.id}]`, job.channel, job.engine || '', job.run_kind, job.competitor_name || '', job.checkin || job.range_from || '', '->', job.checkout || job.range_to || '');
@@ -543,12 +567,12 @@ async function processChannelJob(browser, claim) {
     if (!/^https:\/\//i.test(String(job.url || ''))) res = { status: 'ERROR', reason: 'invalid_job_url' };
     else {
       await preparePage(page);
+      await page.evaluateOnNewDocument(channelSource).catch(() => {}); // fuera del DOM: la sonda analiza el HTML de la web sin el lector
       await page.goto(job.url, { waitUntil: 'domcontentloaded', timeout: CONFIG.navigationTimeoutMs });
       await sleep(2500);
-      const tag = await page.addScriptTag({ content: channelSource });
-      await tag.evaluate((el) => el.remove()).catch(() => {}); // el lector queda cargado pero fuera del DOM (la sonda analiza el HTML de la web)
+      await ensureChannelReader(page);
       const vdiag = job.channel === 'vrbo' && job.run_kind === 'calendar' ? await openVrboCalendar(page, job) : null;
-      res = await page.evaluate((j) => globalThis.BulinChannelReader.run(j), job);
+      res = await runChannelReader(page, job);
       if (vdiag && res && res.status !== 'OK') res.error_detail = [res.error_detail, 'ha ' + JSON.stringify(vdiag)].filter(Boolean).join(' · ').slice(0, 1500);
     }
   } catch (error) { res = { status: 'ERROR', reason: 'channel_exception', error_detail: String(error && error.message || error).slice(0, 300) }; }
