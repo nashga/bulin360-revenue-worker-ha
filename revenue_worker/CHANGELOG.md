@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.4.10
+- Lector ch1.2.2: los importes de 4 cifras sin separador de miles («1151,50 EUR», «1210.00€») se leían truncados (115, 121). Corregido.
+
 ## 0.4.9
 - Lector ch1.2.1: Avaibook con varias estancias (hoteles) da el precio más bajo que admite al grupo. En Airbnb, un grupo mayor que la capacidad del anuncio («Máximo 3 viajeros») queda como restricción y no como «estructura cambiada»; se envía la capacidad para que el Panel (≥ 0.42.3) no vuelva a pedir grupos que no caben.
 

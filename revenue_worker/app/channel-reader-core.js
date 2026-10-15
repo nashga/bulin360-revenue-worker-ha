@@ -25,8 +25,8 @@
   else root.BulinChannelReader = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
-  const VERSION = '1.2.1';
-  const READER_VERSION = 'ch1.2.1';
+  const VERSION = '1.2.2';
+  const READER_VERSION = 'ch1.2.2';
   const AIRBNB_KEY = 'd306zoyjsyarp7ifhu67rjxn52tv0t20'; // clave pública de la web de Airbnb (también se lee de la página)
   const AIRBNB_CAL_HASH = 'bfd57b0552df2e8870f68d5cf501868a0e08417267469f55faefa78aca0234f4'; // respaldo si la página aún no lo ha pedido
   const ENGINES = {
@@ -50,7 +50,7 @@
 
   /** «1.234,56 €», «€ 1,234.56», «300 €» → número; null si no hay importe. */
   function parseEuroAmount(text) {
-    const t = s(text); const m = t.match(/(?:€\s*)?(\d{1,3}(?:[.,\s  ]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:€|EUR)?/);
+    const t = s(text); const m = t.match(/(?:€\s*)?(\d{1,3}(?:[.,\s  ]\d{3})+(?:[.,]\d{1,2})?(?!\d)|\d+(?:[.,]\d{1,2})?)\s*(?:€|EUR)?/);
     if (!m || !/€|EUR/.test(t)) return null;
     let v = m[1].replace(/[\s  ]/g, '');
     if (/,\d{1,2}$/.test(v)) v = v.replace(/\./g, '').replace(',', '.'); else if (/\.\d{1,2}$/.test(v) && /,/.test(v)) v = v.replace(/,/g, ''); else if (/^\d{1,3}(\.\d{3})+$/.test(v)) v = v.replace(/\./g, ''); else if (/^\d{1,3}(,\d{3})+$/.test(v)) v = v.replace(/,/g, '');
