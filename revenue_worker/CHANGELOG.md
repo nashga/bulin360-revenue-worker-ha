@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.4.9
+- Lector ch1.2.1: Avaibook con varias estancias (hoteles) da el precio más bajo que admite al grupo. En Airbnb, un grupo mayor que la capacidad del anuncio («Máximo 3 viajeros») queda como restricción y no como «estructura cambiada»; se envía la capacidad para que el Panel (≥ 0.42.3) no vuelva a pedir grupos que no caben.
+
 ## 0.4.8
 - Corrige «Cannot read properties of undefined (reading 'run')» en Airbnb y otras webs: el lector de canales se carga por el propio navegador en cada página (también tras redirecciones y con CSP estricta) y se comprueba justo antes de leer.
 

@@ -25,8 +25,8 @@
   else root.BulinChannelReader = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
-  const VERSION = '1.2.0';
-  const READER_VERSION = 'ch1.2.0';
+  const VERSION = '1.2.1';
+  const READER_VERSION = 'ch1.2.1';
   const AIRBNB_KEY = 'd306zoyjsyarp7ifhu67rjxn52tv0t20'; // clave pública de la web de Airbnb (también se lee de la página)
   const AIRBNB_CAL_HASH = 'bfd57b0552df2e8870f68d5cf501868a0e08417267469f55faefa78aca0234f4'; // respaldo si la página aún no lo ha pedido
   const ENGINES = {
@@ -85,6 +85,13 @@
     const mn = t.match(/estancia m[ií]nima (?:es )?de (\d+)|minimum stay (?:is )?(\d+)/i); if (mn) return { restriction: true, min_nights: Number(mn[1] || mn[2]) };
     const tot = totalsInText(t); if (tot.length) return { total: tot[0] };
     return {};
+  }
+  /** ch1.2.1 · capacidad del anuncio de Airbnb: «Máximo 3 viajeros», «Se permiten 3 viajeros como máximo», «3 viajeros · 1 dormitorio». */
+  function airbnbCapacity(text) {
+    const t = s(text);
+    const m = t.match(/m[aá]ximo (?:de )?(\d{1,2}) (?:viajeros|hu[eé]spedes|personas)/i) || t.match(/permiten (\d{1,2}) (?:viajeros|hu[eé]spedes|personas) como m[aá]ximo/i)
+      || t.match(/(?:maximum of|max(?:imum)?) (\d{1,2}) guests/i) || t.match(/(\d{1,2}) guests? maximum/i) || t.match(/(?:^|[\s·])(\d{1,2}) (?:viajeros|hu[eé]spedes|guests) · /i);
+    const n = m ? Number(m[1]) : null; return n && n > 0 && n <= 50 ? n : null;
   }
   /** «viernes, 13 de noviembre de 2026» / «Friday, November 13, 2026» → 2026-11-13. */
   function parseDayLabel(label) {
@@ -192,6 +199,20 @@
       }
     }
     return {};
+  }
+  /**
+   * ch1.2.1 · Avaibook con varias estancias (hoteles, p. ej. Hostería del Arco): «Estancias disponibles: Habitación Doble (4 disponibles) | Max: 2 pax … Desde 210.00€».
+   * El «Desde» es el total de la estancia para esas fechas; se toma el más bajo de las que admiten al grupo.
+   */
+  function parseAvaibookRooms(text, guests) {
+    const t = s(text); const i = t.search(/Estancias disponibles|Available (?:units|accommodations)/i); if (i < 0) return null;
+    const g = Number(guests) || 1; let best = null; let units = 0; let listed = 0; let fit = 0;
+    for (const ch of t.slice(i).split(/(?=Desde\s*[\d.,]+\s*€)/i).reduce((a, part, k, arr) => { if (k < arr.length - 1) { const m = arr[k + 1].match(/^Desde\s*([\d.,]+)\s*€/i); a.push({ text: part, price: m ? m[1] : null }); } return a; }, [])) {
+      const max = ch.text.match(/Max:?\s*(\d{1,2})\s*pax/gi); if (!max) continue; listed++; const cap = Number(max[max.length - 1].match(/\d+/)[0]); if (cap < g) continue; fit++;
+      const v = ch.price ? parseEuroAmount(ch.price + ' €') : null; if (!v) continue;
+      const k = ch.text.match(/\((\d+) disponibles?\)[^(]*$/i); units += k ? Number(k[1]) : 1; if (best == null || v < best) best = v;
+    }
+    return listed ? { total: best, rooms_available: units, rooms_listed: listed, rooms_fit: fit } : null;
   }
   /** hb_status_days_all (fecha → clases; o {alojamiento: {fecha → clases}}) → días. La noche está ocupada si el día está lleno o empieza una reserva. */
   function parseHbookStatus(status, from, to) {
@@ -383,7 +404,10 @@
       const txt = b ? [b.innerText || b.textContent, ...[...b.querySelectorAll('[aria-label]')].map((x) => x.getAttribute('aria-label'))].join('\n') : '';
       const r = parseAirbnbBookIt(txt || bodyText(env).slice(0, 0)); return r.total || r.unavailable || r.restriction ? r : (/fechas no disponibles|those dates are not available/i.test(bodyText(env)) ? { unavailable: true } : null);
     }, 20000, 700);
-    const base = { listing: { external_id: pathId || job.external_id }, final_url: env.loc.href };
+    const capacity = airbnbCapacity(bodyText(env));
+    const base = { listing: { external_id: pathId || job.external_id, capacity }, final_url: env.loc.href };
+    // ch1.2.1 · grupo mayor que la capacidad del anuncio: Airbnb deja el bloque de reserva sin precio. Es una restricción, no un cambio de estructura.
+    if (capacity && capacity < Number(job.guests) && !(read && read.total)) return result('RESTRICCION', Object.assign(base, { reason: 'max_guests', error_detail: 'máximo ' + capacity + ' huéspedes', price: { checkin: job.checkin, checkout: job.checkout, guests: job.guests } }));
     if (!read) {
       // Sin bloque de reserva: Airbnb lo oculta cuando las fechas no se pueden reservar. El calendario de la propia página lo confirma.
       const id = String(pathId || job.external_id || ''); const c = /^\d+$/.test(id) ? await airbnbCalendarDays(id, env, job.checkin, job.checkout, 1500) : null;
@@ -509,8 +533,14 @@
   }
   async function avaibookPrice(job, env) {
     const p = qp(env); if (p.get('f_ini') !== job.checkin || p.get('f_fin') !== job.checkout || Number(p.get('capacidad')) !== Number(job.guests)) return result('INCONSISTENTE', { reason: 'context_mismatch', error_detail: 'url_params' });
-    const read = await waitFor(env, () => { const r = parseAvaibookText(bodyText(env)); return r.total || r.unavailable ? r : null; }, 25000, 800);
+    const read = await waitFor(env, () => { const r = parseAvaibookText(bodyText(env)); if (r.total || r.unavailable) return r; const m = parseAvaibookRooms(bodyText(env), job.guests); return m ? { rooms: m } : null; }, 25000, 800);
     if (!read) return result('ESTRUCTURA_CAMBIADA', { reason: 'avaibook_total_not_found', error_detail: pageHint(env), final_url: env.loc.href });
+    if (read.rooms) { // ch1.2.1 · varias estancias (hotel)
+      const m = read.rooms; const price = priceBase(job, { rooms_available: m.rooms_available });
+      if (!m.total && !m.rooms_fit) return result('PARCIAL', { reason: 'no_room_for_group', price, final_url: env.loc.href });
+      if (!m.total) return result('SIN_DISPONIBILIDAD', { reason: 'no_rooms', price, final_url: env.loc.href });
+      return result('OK', { price: Object.assign(price, { total: m.total, price_basis: 'from' }), final_url: env.loc.href });
+    }
     if (read.unavailable) return result('SIN_DISPONIBILIDAD', { reason: 'dates_not_available', price: priceBase(job, { rooms_available: 0 }), final_url: env.loc.href });
     return result('OK', { price: priceBase(job, { total: read.total }), final_url: env.loc.href });
   }
@@ -639,7 +669,7 @@
   /** Capacidades que anuncia el worker (claim.capabilities). */
   function capabilities(opts) { const o = opts || {}; return { channels: o.direct === false ? ['airbnb', 'vrbo'] : ['airbnb', 'vrbo', 'direct'], direct_engines: SUPPORTED_DIRECT.slice(), channel_reader: VERSION, trusted_click: !!o.trustedClick }; } // trusted_click: el worker puede hacer clics reales (HA/Playwright) → recibe los calendarios de VRBO
 
-  return { VERSION, READER_VERSION, SUPPORTED_DIRECT, run, capabilities, parseEuroAmount, totalsInText, classifyBlock, airbnbGlobalId, parseAirbnbCalendar, parseAirbnbBookIt, parseDayLabel, vrboDayState,
-    parseVrboPriceSummary, vrboUnavailableText, vrboDayStateAria, parseAmenitizAvailability, parseAmenitizRooms, parseAviratoText, availroomIdsFromText, parseAvailroomV3, misterplanIdsFromText, parseMisterplanResult, parseAvaibookText, parseHbookStatus, parseSiteminderRooms, parseRoomcloudText, parsePinpointSchedule, pinpointStay, parseThelisProducts, detectEngine, bookingLinks,
+  return { VERSION, READER_VERSION, SUPPORTED_DIRECT, run, capabilities, parseEuroAmount, totalsInText, airbnbCapacity, classifyBlock, airbnbGlobalId, parseAirbnbCalendar, parseAirbnbBookIt, parseDayLabel, vrboDayState,
+    parseVrboPriceSummary, vrboUnavailableText, vrboDayStateAria, parseAmenitizAvailability, parseAmenitizRooms, parseAviratoText, availroomIdsFromText, parseAvailroomV3, misterplanIdsFromText, parseMisterplanResult, parseAvaibookText, parseAvaibookRooms, parseHbookStatus, parseSiteminderRooms, parseRoomcloudText, parsePinpointSchedule, pinpointStay, parseThelisProducts, detectEngine, bookingLinks,
     _internal: { siteminderPrice, roomcloudPrice, pinpointCalendar, pinpointPrice, availroomPrice, misterplanPrice, avaibookPrice, hbookCalendar, thelisPrice, dismissConsent, airbnbCalendar, airbnbPrice, airbnbStayFromCalendar, vrboPrice, amenitizCalendar, amenitizPrice, aviratoPrice, probe, addDays } };
 });
