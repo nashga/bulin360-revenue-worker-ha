@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.4.11
+- Lector ch1.2.3: si Airbnb o VRBO dicen que el anuncio ya no existe («Hemos eliminado la página que buscas»), la lectura sale como «listing_removed» y el Panel (≥ 0.42.5) desactiva el anuncio a la segunda vez.
+
 ## 0.4.10
 - Lector ch1.2.2: los importes de 4 cifras sin separador de miles («1151,50 EUR», «1210.00€») se leían truncados (115, 121). Corregido.
 

@@ -25,8 +25,8 @@
   else root.BulinChannelReader = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
-  const VERSION = '1.2.2';
-  const READER_VERSION = 'ch1.2.2';
+  const VERSION = '1.2.3';
+  const READER_VERSION = 'ch1.2.3';
   const AIRBNB_KEY = 'd306zoyjsyarp7ifhu67rjxn52tv0t20'; // clave pública de la web de Airbnb (también se lee de la página)
   const AIRBNB_CAL_HASH = 'bfd57b0552df2e8870f68d5cf501868a0e08417267469f55faefa78aca0234f4'; // respaldo si la página aún no lo ha pedido
   const ENGINES = {
@@ -92,6 +92,10 @@
     const m = t.match(/m[aá]ximo (?:de )?(\d{1,2}) (?:viajeros|hu[eé]spedes|personas)/i) || t.match(/permiten (\d{1,2}) (?:viajeros|hu[eé]spedes|personas) como m[aá]ximo/i)
       || t.match(/(?:maximum of|max(?:imum)?) (\d{1,2}) guests/i) || t.match(/(\d{1,2}) guests? maximum/i) || t.match(/(?:^|[\s·])(\d{1,2}) (?:viajeros|hu[eé]spedes|guests) · /i);
     const n = m ? Number(m[1]) : null; return n && n > 0 && n <= 50 ? n : null;
+  }
+  /** ch1.2.3 · el anuncio ya no existe en el portal («Hemos eliminado la página que buscas» en Airbnb). */
+  function listingRemoved(text) {
+    return /hemos eliminado la p[aá]gina que buscas|we can['’]t seem to find the page|this (?:listing|page) (?:is )?no longer (?:exists|available)|este anuncio ya no est[aá] disponible|la p[aá]gina que buscas no existe/i.test(s(text).slice(0, 3000));
   }
   /** «viernes, 13 de noviembre de 2026» / «Friday, November 13, 2026» → 2026-11-13. */
   function parseDayLabel(label) {
@@ -647,6 +651,8 @@
       if (dismissConsent(env)) await env.sleep(1200);
       const b = blocked(env); if (b) return result(b.status, { reason: b.reason, final_url: env.loc.href, duration_ms: env.now() - t0 });
       const k = job.run_kind; const ch = job.channel; const eng = job.engine;
+      // ch1.2.3 · anuncio eliminado del portal: no es un cambio de estructura; el Panel lo desactiva si se repite
+      if ((ch === 'airbnb' || ch === 'vrbo') && k !== 'probe' && listingRemoved(bodyText(env))) return result('ESTRUCTURA_CAMBIADA', { reason: 'listing_removed', error_detail: s(env.doc && env.doc.title).slice(0, 120), final_url: env.loc.href, duration_ms: env.now() - t0 });
       let r;
       if (k === 'probe') r = await probe(job, env);
       else if (ch === 'airbnb') r = k === 'calendar' ? await airbnbCalendar(job, env) : await airbnbPrice(job, env);
@@ -669,7 +675,7 @@
   /** Capacidades que anuncia el worker (claim.capabilities). */
   function capabilities(opts) { const o = opts || {}; return { channels: o.direct === false ? ['airbnb', 'vrbo'] : ['airbnb', 'vrbo', 'direct'], direct_engines: SUPPORTED_DIRECT.slice(), channel_reader: VERSION, trusted_click: !!o.trustedClick }; } // trusted_click: el worker puede hacer clics reales (HA/Playwright) → recibe los calendarios de VRBO
 
-  return { VERSION, READER_VERSION, SUPPORTED_DIRECT, run, capabilities, parseEuroAmount, totalsInText, airbnbCapacity, classifyBlock, airbnbGlobalId, parseAirbnbCalendar, parseAirbnbBookIt, parseDayLabel, vrboDayState,
+  return { VERSION, READER_VERSION, SUPPORTED_DIRECT, run, capabilities, parseEuroAmount, totalsInText, airbnbCapacity, listingRemoved, classifyBlock, airbnbGlobalId, parseAirbnbCalendar, parseAirbnbBookIt, parseDayLabel, vrboDayState,
     parseVrboPriceSummary, vrboUnavailableText, vrboDayStateAria, parseAmenitizAvailability, parseAmenitizRooms, parseAviratoText, availroomIdsFromText, parseAvailroomV3, misterplanIdsFromText, parseMisterplanResult, parseAvaibookText, parseAvaibookRooms, parseHbookStatus, parseSiteminderRooms, parseRoomcloudText, parsePinpointSchedule, pinpointStay, parseThelisProducts, detectEngine, bookingLinks,
     _internal: { siteminderPrice, roomcloudPrice, pinpointCalendar, pinpointPrice, availroomPrice, misterplanPrice, avaibookPrice, hbookCalendar, thelisPrice, dismissConsent, airbnbCalendar, airbnbPrice, airbnbStayFromCalendar, vrboPrice, amenitizCalendar, amenitizPrice, aviratoPrice, probe, addDays } };
 });
