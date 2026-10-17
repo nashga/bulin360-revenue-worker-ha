@@ -40,13 +40,17 @@ function paint() {
     tile('Sin conexión', items.filter((x) => x.offline).length, items.some((x) => x.offline) ? 'bad' : ''), tile('Puertas', items.length, ''));
   // agrupar por alojamiento con las relaciones del Panel
   const names = Object.fromEntries((d.properties || []).map((x) => [x.id, x.name])); const links = d.links || {};
+  const spaces = Object.fromEntries((d.spaces || []).map((x) => [x.id, x.name])); const spaceLinks = d.space_links || {};
   const groups = new Map();
   for (const x of items) {
     const ids = (links[x.entity_id] || []).filter((i) => names[i]);
-    const keys = ids.length ? ids.map((i) => names[i]) : ['Sin asignar a un alojamiento'];
+    const sp = spaces[spaceLinks[x.entity_id]];
+    const keys = [...ids.map((i) => names[i]), ...(sp ? [`${sp} · servicio`] : [])];
+    if (!keys.length) keys.push('Sin asignar a un alojamiento');
     for (const k of keys) { if (!groups.has(k)) groups.set(k, []); groups.get(k).push(x); }
   }
-  const order = [...groups.keys()].sort((a, b) => (a.startsWith('Sin asignar') ? 1 : 0) - (b.startsWith('Sin asignar') ? 1 : 0) || a.localeCompare(b, 'es'));
+  const rank = (k) => (k.startsWith('Sin asignar') ? 2 : k.endsWith(' · servicio') ? 1 : 0);
+  const order = [...groups.keys()].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b, 'es'));
   $('list').replaceChildren(...(items.length ? order.map((k) => h('section', { class: 'group' }, h('h2', { class: 'group__head' }, k), h('div', { class: 'group__list' }, ...groups.get(k).map(card)))) : [h('p', { class: 'empty' }, d.local_error ? 'No se pudieron leer las cerraduras de Home Assistant.' : 'No hay cerraduras ni portales en este Home Assistant.')]));
   $('foot').textContent = `Bulín Puertas ${d.version || ''}${p.last_sync ? ` · sincronizado ${p.last_sync}` : ''}${d.user ? ` · ${d.user}` : ''}`;
 }

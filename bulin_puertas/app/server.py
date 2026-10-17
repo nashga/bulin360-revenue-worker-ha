@@ -15,7 +15,7 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.0.2"
+VERSION = "1.0.3"
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 OPTIONS_FILE = os.environ.get("BULIN_OPTIONS", "/data/options.json")
 HA = os.environ.get("BULIN_HA_API", "http://supervisor/core/api")
@@ -45,7 +45,7 @@ TIMING = {"poll": POLL_SECONDS, "sync": SYNC_SECONDS}
 TEMPLATE = """{% set out = namespace(l=[], p=[]) %}{% for s in states.lock %}{% set d = device_id(s.entity_id) %}{% set out.l = out.l + [{'e': s.entity_id, 'name': s.name, 'state': s.state, 'sf': s.attributes.supported_features | default(0), 'maker': (device_attr(d, 'manufacturer') if d else '') or '', 'model': (device_attr(d, 'model') if d else '') or '', 'ents': (device_entities(d) if d else [])}] %}{% endfor %}{% for e in integration_entities('shelly') | select('match', 'switch\\\\.') %}{% set d = device_id(e) %}{% set out.p = out.p + [{'e': e, 'name': state_attr(e, 'friendly_name') or e, 'state': states(e), 'model': (device_attr(d, 'model') if d else '') or 'Shelly'}] %}{% endfor %}{{ {'locks': out.l, 'portals': out.p} | to_json }}"""
 
 STATE = {"panel": {"configured": False, "connected": False, "error": None, "device": None, "last_sync": None, "last_poll": None},
-         "properties": [], "links": {}, "hidden": [], "local_error": None, "commands_done": 0}
+         "properties": [], "links": {}, "spaces": [], "space_links": {}, "hidden": [], "local_error": None, "commands_done": 0}
 LOCK = threading.Lock()
 WAKE = threading.Event()
 
@@ -234,6 +234,8 @@ def apply_sync_response(j):
         if "properties" in j:
             STATE["properties"] = j.get("properties") or []
             STATE["links"] = j.get("links") or {}
+            STATE["spaces"] = j.get("spaces") or []
+            STATE["space_links"] = j.get("space_links") or {}
             STATE["hidden"] = j.get("hidden") or []
     for c in j.get("commands") or []:
         threading.Thread(target=run_command, args=(c,), daemon=True).start()
@@ -318,7 +320,7 @@ class H(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         if path == "/api/state":
             o = options()
-            out = {"ok": True, "version": VERSION, "confirm": bool(o.get("confirm", True)), "panel": dict(STATE["panel"]), "properties": STATE["properties"], "links": STATE["links"], "user": self._user()}
+            out = {"ok": True, "version": VERSION, "confirm": bool(o.get("confirm", True)), "panel": dict(STATE["panel"]), "properties": STATE["properties"], "links": STATE["links"], "spaces": STATE["spaces"], "space_links": STATE["space_links"], "user": self._user()}
             try:
                 out["items"], _ = discover()
             except Exception as e:

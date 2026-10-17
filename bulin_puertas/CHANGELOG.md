@@ -1,5 +1,8 @@
 # Cambios
 
+## 1.0.3
+- Espacios de servicio del Panel (Caldera, Almacén, Lavandería, Restaurante…): el panel «Puertas» agrupa esas puertas con su nombre.
+
 ## 1.0.2
 - Corrige el 401 de Home Assistant: el token del Supervisor no llegaba a la app con s6-overlay.
 - Si la plantilla de HA falla, descubre las cerraduras solo con los estados.
