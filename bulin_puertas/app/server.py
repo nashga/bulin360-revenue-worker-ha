@@ -15,11 +15,26 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 OPTIONS_FILE = os.environ.get("BULIN_OPTIONS", "/data/options.json")
 HA = os.environ.get("BULIN_HA_API", "http://supervisor/core/api")
-SUP_TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
+def _sup_token():
+    """Token del Supervisor: en el entorno o, con s6-overlay, en /run/s6/container_environment (1.0.2)."""
+    t = os.environ.get("SUPERVISOR_TOKEN", "")
+    if not t:
+        for f in ("/run/s6/container_environment/SUPERVISOR_TOKEN", "/var/run/s6/container_environment/SUPERVISOR_TOKEN"):
+            try:
+                with open(f, encoding="utf-8") as fh:
+                    t = fh.read().strip()
+                if t:
+                    break
+            except OSError:
+                pass
+    return t
+
+
+SUP_TOKEN = _sup_token()
 PORT = int(os.environ.get("BULIN_PORT", "8099"))
 INGRESS_IPS = {"172.30.32.2", "127.0.0.1"}
 TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png"}
@@ -68,6 +83,9 @@ def http(method, url, body=None, headers=None, timeout=20):
 
 
 def ha(method, path, body=None):
+    global SUP_TOKEN
+    if not SUP_TOKEN:
+        SUP_TOKEN = _sup_token()
     st, raw = http(method, HA + path, body, {"Authorization": f"Bearer {SUP_TOKEN}"})
     if st == 0 or st >= 400:
         raise RuntimeError(f"Home Assistant {st}: {raw[:160].decode('utf-8', 'replace')}")
@@ -103,7 +121,23 @@ def discover():
     o = options()
     hide = set(o.get("hide") or []) | set(STATE["hidden"])
     states = {s["entity_id"]: s for s in json.loads(ha("GET", "/states").decode())}
-    data = json.loads(ha("POST", "/template", {"template": TEMPLATE}).decode() or "{}")
+    try:
+        data = json.loads(ha("POST", "/template", {"template": TEMPLATE}).decode() or "{}")
+        STATE["template_error"] = None
+    except Exception as ex:
+        # 1.0.2 · si la plantilla falla (versión de HA, permisos…), se descubre solo con los estados: cerraduras lock.* y switch.* de Shelly por nombre
+        if STATE.get("template_error") != str(ex)[:160]:
+            log("Aviso: no se pudo usar la plantilla de HA; uso solo los estados.", str(ex)[:160])
+        STATE["template_error"] = str(ex)[:160]
+        data = {"locks": [], "portals": []}
+        for e, st in states.items():
+            a = st.get("attributes", {})
+            if e.startswith("lock."):
+                obj = e.split(".", 1)[1]
+                ents = [x for x in states if x.split(".", 1)[1].startswith(obj + "_") or x.split(".", 1)[1] == obj]
+                data["locks"].append({"e": e, "name": a.get("friendly_name") or e, "state": st.get("state"), "sf": a.get("supported_features", 0), "maker": "", "model": "", "ents": ents})
+            elif e.startswith("switch.") and "shelly" in e.lower():
+                data["portals"].append({"e": e, "name": a.get("friendly_name") or e, "state": st.get("state"), "model": "Shelly"})
     out = []
     for l in data.get("locks", []):
         if l["e"] in hide:
@@ -221,7 +255,10 @@ def bridge():
                     items, _ = discover()
                     STATE["local_error"] = None
                 except Exception as e:
-                    items, STATE["local_error"] = None, str(e)[:200]
+                    msg = f"No se pudieron leer las cerraduras de Home Assistant: {str(e)[:200]}"
+                    if STATE["local_error"] != msg:
+                        log(msg)
+                    items, STATE["local_error"] = None, msg
                 if items is not None:
                     hv = {}
                     try:
@@ -230,6 +267,10 @@ def bridge():
                     except Exception:
                         pass
                     j = panel("POST", "doors/ha/sync.php", {"version": VERSION, "ha": hv, "entities": items})
+                    n = (len([x for x in items if x["kind"] == "lock"]), len([x for x in items if x["kind"] == "portal"]))
+                    if STATE.get("last_counts") != n:
+                        log(f"Enviado al Panel: {n[0]} cerraduras y {n[1]} portales")
+                        STATE["last_counts"] = n
                     STATE["panel"]["last_sync"] = time.strftime("%H:%M:%S")
                     apply_sync_response(j)
                     last_sync = time.time()

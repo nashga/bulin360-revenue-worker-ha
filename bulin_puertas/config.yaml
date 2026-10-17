@@ -1,5 +1,5 @@
 name: Bulín Puertas
-version: "1.0.1"
+version: "1.0.2"
 slug: bulin_puertas
 description: Puertas de la casa (Nuki, Danalock, portales Shelly) conectadas al Panel de El Bulín, sin Availroom. Independiente de Revenue.
 url: https://github.com/nashga/bulin360-revenue-worker-ha
