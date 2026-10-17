@@ -15,7 +15,7 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 OPTIONS_FILE = os.environ.get("BULIN_OPTIONS", "/data/options.json")
 HA = os.environ.get("BULIN_HA_API", "http://supervisor/core/api")
@@ -55,7 +55,9 @@ def options():
 
 def http(method, url, body=None, headers=None, timeout=20):
     data = None if body is None else json.dumps(body).encode()
-    req = urllib.request.Request(url, data=data, method=method, headers={"Content-Type": "application/json", "Accept": "application/json", **(headers or {})})
+    # 1.0.1 · agente identificable tipo navegador: algunos cortafuegos de hosting rechazan «Python-urllib» con un 403
+    req = urllib.request.Request(url, data=data, method=method, headers={"Content-Type": "application/json", "Accept": "application/json, */*;q=0.5", "Accept-Language": "es-ES,es;q=0.9",
+                                                                         "User-Agent": f"Mozilla/5.0 (compatible; BulinPuertas/{VERSION}; +https://www.elbulin.es)", **(headers or {})})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.status, r.read()
@@ -82,7 +84,8 @@ def panel(method, path, body=None, timeout=20):
     if st == 0:
         raise ConnectionError(raw.decode("utf-8", "replace")[:160])
     if st >= 400 or not j.get("ok", False):
-        e = RuntimeError(j.get("error") or f"Panel {st}")
+        detail = j.get("error") or (raw[:120].decode("utf-8", "replace").strip().replace("\n", " ") if not j else "")
+        e = RuntimeError(f"Panel {st}: {detail}" if detail else f"Panel {st}")
         e.status = st
         raise e
     return j
