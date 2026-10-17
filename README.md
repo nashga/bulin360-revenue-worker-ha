@@ -29,3 +29,10 @@ Los secretos quedan en la configuración local del add-on.
 Añadir este repositorio a la tienda de add-ons de Home Assistant y después instalar **Bulin360 Revenue Worker**.
 
 > La primera versión está orientada a workers PUBLIC. El perfil de Chromium se guarda de forma persistente en `/data` para permitir futuras variantes con sesión.
+
+## Apps de este repositorio
+
+| App | Para qué |
+|---|---|
+| **Bulin360 Revenue Worker** (`revenue_worker`) | Lecturas de Revenue / Competencia. |
+| **Bulín Puertas** (`bulin_puertas`) | Cerraduras de la casa (Nuki, Danalock, portales Shelly) conectadas al Panel, sin Availroom. Independiente de Revenue: se instala solo en los HA que tengan puertas. Ver `bulin_puertas/DOCS.md`. |

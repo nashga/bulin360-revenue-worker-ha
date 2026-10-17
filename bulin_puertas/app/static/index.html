@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Puertas · El Bulín</title>
+<link rel="stylesheet" href="app.css?v=1.0.0">
+</head>
+<body>
+<main class="app">
+  <header class="bar">
+    <div><h1>Puertas</h1><p id="sub" class="sub" role="status">Cargando…</p></div>
+    <button id="refresh" class="iconbtn" type="button" aria-label="Actualizar"><svg viewBox="0 0 24 24" class="ic" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.3-5.7L20 8.5"/><path d="M20 4v4.5h-4.5"/></svg></button>
+  </header>
+  <div id="conn" class="conn" hidden></div>
+  <div id="tiles" class="tiles"></div>
+  <div id="list"></div>
+  <footer id="foot" class="foot"></footer>
+</main>
+<dialog id="confirm" class="dlg">
+  <form method="dialog" class="dlg__body">
+    <h2 id="c-title"></h2><p id="c-text"></p>
+    <div class="dlg__actions"><button value="cancel" class="btn">Cancelar</button><button value="ok" class="btn btn--primary" id="c-ok">Aceptar</button></div>
+  </form>
+</dialog>
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+<script type="module" src="app.js?v=1.0.0"></script>
+</body>
+</html>

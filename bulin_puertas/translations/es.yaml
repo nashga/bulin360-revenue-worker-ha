@@ -1,0 +1,16 @@
+configuration:
+  panel_url:
+    name: Dirección de la API del Panel
+    description: Normalmente https://www.elbulin.es/operaciones/admin-nuevo/api/
+  panel_token:
+    name: Token de este Home Assistant
+    description: Se crea en el Panel → Servicios → Aperturas → Home Assistant. Sin token, la app funciona solo en local.
+  portals:
+    name: Otros portales
+    description: Solo si un portal no es un Shelly (botón o script). Los Shelly se detectan solos.
+  hide:
+    name: Ocultar
+    description: Entidades que no deben aparecer ni enviarse al Panel (p. ej. lock.trastero).
+  confirm:
+    name: Pedir confirmación
+    description: Preguntar antes de abrir o cerrar en el panel local.
