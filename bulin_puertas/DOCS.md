@@ -6,8 +6,8 @@ Independiente de la app de Revenue: se instala y actualiza por separado.
 ## Qué hace
 
 - Descubre sola las cerraduras de este Home Assistant (entidades `lock.*`) y los Shelly de portal (switch de la integración Shelly).
-- Envía su estado al Panel (abierta/cerrada, batería, puerta abierta, atascada, sin conexión) cada 20 segundos.
-- Recoge cada 3 segundos las órdenes de abrir o cerrar del Panel y del Control y las ejecuta aquí. Conexión solo de salida: no hay que abrir puertos.
+- Envía su estado al Panel (abierta/cerrada, batería, puerta abierta, atascada, sin conexión) cada 60 segundos.
+- Recoge cada 5 segundos las órdenes de abrir o cerrar del Panel y del Control y las ejecuta aquí. Conexión solo de salida: no hay que abrir puertos.
 - Panel «Puertas» en la barra lateral para abrir y cerrar en local (también queda registrado en el Panel).
 - Nuki: «Abrir» retira también el resbalón. Shelly: solo pulsar (el Shelly se apaga solo).
 

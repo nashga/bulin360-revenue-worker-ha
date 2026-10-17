@@ -2,7 +2,7 @@
 
 Hace de puente entre las cerraduras de la casa y el Panel de El Bulín, sin Availroom:
   · descubre las cerraduras de este HA (lock.*: Nuki, Danalock por Z-Wave…) y los Shelly que abren portales (solo pulsar);
-  · envía su estado al Panel cada 20 s y recoge cada 3 s las órdenes de abrir o cerrar del Panel o del Control
+  · envía su estado al Panel cada 60 s y recoge cada 5 s las órdenes de abrir o cerrar del Panel o del Control
     (conexión solo de salida: no hay que abrir puertos);
   · ofrece el panel «Puertas» en la barra lateral de HA para abrir y cerrar en local (también se registra en el Panel).
 Solo biblioteca estándar de Python. Las órdenes van al API de Home Assistant con el token del Supervisor.
@@ -23,7 +23,8 @@ SUP_TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
 PORT = int(os.environ.get("BULIN_PORT", "8099"))
 INGRESS_IPS = {"172.30.32.2", "127.0.0.1"}
 TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png"}
-POLL_SECONDS, SYNC_SECONDS = 3, 20
+POLL_SECONDS, SYNC_SECONDS = 5, 60  # valores por defecto; el Panel puede indicar otros en cada sincronización
+TIMING = {"poll": POLL_SECONDS, "sync": SYNC_SECONDS}
 
 # Jinja de HA: cerraduras con su dispositivo (fabricante, modelo, entidades hermanas) y los switch de la integración Shelly
 TEMPLATE = """{% set out = namespace(l=[], p=[]) %}{% for s in states.lock %}{% set d = device_id(s.entity_id) %}{% set out.l = out.l + [{'e': s.entity_id, 'name': s.name, 'state': s.state, 'sf': s.attributes.supported_features | default(0), 'maker': (device_attr(d, 'manufacturer') if d else '') or '', 'model': (device_attr(d, 'model') if d else '') or '', 'ents': (device_entities(d) if d else [])}] %}{% endfor %}{% for e in integration_entities('shelly') | select('match', 'switch\\\\.') %}{% set d = device_id(e) %}{% set out.p = out.p + [{'e': e, 'name': state_attr(e, 'friendly_name') or e, 'state': states(e), 'model': (device_attr(d, 'model') if d else '') or 'Shelly'}] %}{% endfor %}{{ {'locks': out.l, 'portals': out.p} | to_json }}"""
@@ -189,6 +190,10 @@ def run_command(c):
 def apply_sync_response(j):
     with LOCK:
         STATE["panel"].update({"connected": True, "error": None, "device": (j.get("device") or {}).get("name")})
+        if j.get("poll_seconds"):
+            TIMING["poll"] = max(2, min(60, int(j["poll_seconds"])))
+        if j.get("sync_seconds"):
+            TIMING["sync"] = max(20, min(600, int(j["sync_seconds"])))
         if "properties" in j:
             STATE["properties"] = j.get("properties") or []
             STATE["links"] = j.get("links") or {}
@@ -199,7 +204,7 @@ def apply_sync_response(j):
 
 def bridge():
     """Bucle de conexión con el Panel: sincroniza cada 20 s (o tras una orden) y consulta órdenes cada 3 s."""
-    last_sync, backoff = 0.0, POLL_SECONDS
+    last_sync, backoff = 0.0, TIMING["poll"]
     while True:
         o = options()
         STATE["panel"]["configured"] = bool(o.get("panel_token"))
@@ -207,7 +212,7 @@ def bridge():
             STATE["panel"].update({"connected": False, "error": "Falta el token del Panel en la configuración de la app."})
             WAKE.wait(30); WAKE.clear(); continue
         try:
-            if time.time() - last_sync >= SYNC_SECONDS or WAKE.is_set():
+            if time.time() - last_sync >= TIMING["sync"] or WAKE.is_set():
                 WAKE.clear()
                 try:
                     items, _ = discover()
@@ -228,7 +233,7 @@ def bridge():
             j = panel("GET", "doors/ha/poll.php", timeout=15)
             STATE["panel"]["last_poll"] = time.strftime("%H:%M:%S")
             apply_sync_response(j)
-            backoff = POLL_SECONDS
+            backoff = TIMING["poll"]
         except Exception as e:
             status = getattr(e, "status", 0)
             msg = "Token no válido o revocado: revísalo en el Panel." if status == 401 else f"Sin conexión con el Panel: {e}"
@@ -236,7 +241,7 @@ def bridge():
                 log(msg)
             STATE["panel"].update({"connected": False, "error": msg})
             backoff = min(60, backoff * 2) if status != 401 else 120
-        WAKE.wait(backoff if not STATE["panel"]["connected"] else POLL_SECONDS)
+        WAKE.wait(backoff if not STATE["panel"]["connected"] else TIMING["poll"])
 
 
 class H(BaseHTTPRequestHandler):
