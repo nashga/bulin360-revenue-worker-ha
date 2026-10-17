@@ -73,7 +73,7 @@ def ha(method, path, body=None):
 
 def panel(method, path, body=None, timeout=20):
     o = options()
-    st, raw = http(method, o["panel_url"].rstrip("/") + "/" + path, body, {"Authorization": f"Bearer {o['panel_token']}", "X-Bulin-App": f"puertas-{VERSION}"}, timeout)
+    st, raw = http(method, o["panel_url"].rstrip("/") + "/" + path, body, {"Authorization": f"Bearer {o['panel_token']}", "X-Bulin-Token": o["panel_token"], "X-Bulin-App": f"puertas-{VERSION}"}, timeout)
     try:
         j = json.loads(raw.decode() or "{}")
     except Exception:
