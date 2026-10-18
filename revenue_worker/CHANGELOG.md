@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.15
+- Lector ch1.2.7 (igual que la extensión de Chrome 0.6.8):
+  - Avirato: «sin disponibilidad» manda sobre el aviso general «Estancia mínima de N noche(s) en todo el establecimiento» (antes podía acabar en avirato_rooms_not_found o en una restricción falsa).
+  - Avaibook: un aviso «Durante la temporada del … al …, este alojamiento exige: Estancia mínima de N noches» solo cuenta si la estancia pedida cae dentro de esa temporada; con varios avisos, el de las fechas pedidas.
+  - Antes de dar por buena una estancia mínima se esperan 10 s (antes 4) por si la página pinta luego el total.
+
 ## 0.4.14
 - Lector ch1.2.6: Avirato muestra «Precio desde 150,00 € por noche» junto al aviso de estancia mínima, y el «€» hacía que se ignorase la restricción (salía avirato_rooms_not_found, p. ej. Atempo 13-15/11). Ahora manda el total si lo hay; si no, a los pocos segundos sale como restricción (min_nights).
 
