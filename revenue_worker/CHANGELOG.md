@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.4.14
+- Lector ch1.2.6: Avirato muestra «Precio desde 150,00 € por noche» junto al aviso de estancia mínima, y el «€» hacía que se ignorase la restricción (salía avirato_rooms_not_found, p. ej. Atempo 13-15/11). Ahora manda el total si lo hay; si no, a los pocos segundos sale como restricción (min_nights).
+
 ## 0.4.13
 - Lector ch1.2.5: estancia mínima en Avaibook («este alojamiento exige: Estancia mínima de N noches») y Avirato («Estancia mínima de N noche(s) en todo el establecimiento») sale como restricción (min_nights) y no como avaibook_total_not_found / avirato_rooms_not_found.
 - Avaibook: «Fechas no disponibles» cuenta como sin disponibilidad. Avirato añade la pista de la página cuando no encuentra nada.
