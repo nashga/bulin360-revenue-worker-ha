@@ -12,10 +12,11 @@ import os
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.0.3"
+VERSION = "1.0.4"
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 OPTIONS_FILE = os.environ.get("BULIN_OPTIONS", "/data/options.json")
 HA = os.environ.get("BULIN_HA_API", "http://supervisor/core/api")
@@ -40,6 +41,9 @@ INGRESS_IPS = {"172.30.32.2", "127.0.0.1"}
 TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png"}
 POLL_SECONDS, SYNC_SECONDS = 5, 60  # valores por defecto; el Panel puede indicar otros en cada sincronización
 TIMING = {"poll": POLL_SECONDS, "sync": SYNC_SECONDS}
+DATA_DIR = os.environ.get("BULIN_DATA", "/data")
+EVENTS_BACKFILL_DAYS = 10   # la primera vez se envía lo que el HA guarde (por defecto unos 10 días)
+EVENTS_MAX_PER_SYNC = 300
 
 # Jinja de HA: cerraduras con su dispositivo (fabricante, modelo, entidades hermanas) y los switch de la integración Shelly
 TEMPLATE = """{% set out = namespace(l=[], p=[]) %}{% for s in states.lock %}{% set d = device_id(s.entity_id) %}{% set out.l = out.l + [{'e': s.entity_id, 'name': s.name, 'state': s.state, 'sf': s.attributes.supported_features | default(0), 'maker': (device_attr(d, 'manufacturer') if d else '') or '', 'model': (device_attr(d, 'model') if d else '') or '', 'ents': (device_entities(d) if d else [])}] %}{% endfor %}{% for e in integration_entities('shelly') | select('match', 'switch\\\\.') %}{% set d = device_id(e) %}{% set out.p = out.p + [{'e': e, 'name': state_attr(e, 'friendly_name') or e, 'state': states(e), 'model': (device_attr(d, 'model') if d else '') or 'Shelly'}] %}{% endfor %}{{ {'locks': out.l, 'portals': out.p} | to_json }}"""
@@ -139,9 +143,11 @@ def discover():
             elif e.startswith("switch.") and "shelly" in e.lower():
                 data["portals"].append({"e": e, "name": a.get("friendly_name") or e, "state": st.get("state"), "model": "Shelly"})
     out = []
+    watch = {}  # 1.0.4 · entidades cuyo historial se envía al Panel: entidad → (cerradura o portal, tipo)
     for l in data.get("locks", []):
         if l["e"] in hide:
             continue
+        watch[l["e"]] = (l["e"], "lock")
         bat = door = None
         jammed = dead = False
         for e in l.get("ents") or []:
@@ -154,8 +160,10 @@ def discover():
                 bat = num(s["state"])
             elif e.startswith("binary_sensor.") and (dc in ("door", "opening") or "status_of_the_door" in low or "puerta" in low):
                 door = s["state"] == "on"
+                watch[e] = (l["e"], "door")
             elif e.startswith("binary_sensor.") and "jam" in low:
                 jammed = s["state"] == "on"
+                watch[e] = (l["e"], "jammed")
             elif e.startswith("sensor.") and ("node_status" in low or "estado_del_nodo" in low):
                 dead = s["state"] == "dead"
         if bat is None:
@@ -170,12 +178,77 @@ def discover():
         if not e or e in hide or e in seen or e.split(".")[0] not in ("switch", "button", "script"):
             continue
         seen.add(e)
+        watch[e] = (e, "portal")
         s = states.get(e, {})
         st = s.get("state", "unavailable")
         out.append({"entity_id": e, "kind": "portal", "name": p.get("name") or s.get("attributes", {}).get("friendly_name") or e, "model": p.get("model") or "",
                     "state": st, "battery": None, "door_open": None, "jammed": False, "offline": st in ("unavailable",) and not e.startswith(("button.", "script.")), "can_open": True})
     out.sort(key=lambda x: (x["kind"], x["name"].lower()))
+    STATE["watch"] = watch
     return out, states
+
+
+def _cursor_file():
+    d = DATA_DIR if os.path.isdir(DATA_DIR) else os.environ.get("TMPDIR", "/tmp")
+    return os.path.join(d, "bulin_puertas_events.json")
+
+
+def load_cursor():
+    try:
+        with open(_cursor_file(), encoding="utf-8") as f:
+            return json.load(f).get("since")
+    except Exception:
+        return None
+
+
+def save_cursor(since):
+    try:
+        with open(_cursor_file(), "w", encoding="utf-8") as f:
+            json.dump({"since": since}, f)
+    except Exception as e:
+        log("No se pudo guardar el cursor del historial:", e)
+
+
+EV_VALUES = {"lock": {"locked", "unlocked", "open", "opening", "jammed", "unavailable"}, "door": {"on", "off"}, "jammed": {"on"}, "portal": {"on"}}
+
+
+def collect_events():
+    """1.0.4 · Movimientos de las cerraduras desde el historial de HA (abrir/cerrar venga de donde venga, puerta, atasco, portales).
+    Devuelve (eventos, nuevo_cursor). El cursor solo avanza cuando el Panel los ha recibido."""
+    watch = STATE.get("watch") or {}
+    if not watch:
+        return [], None
+    since = load_cursor() or time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(time.time() - EVENTS_BACKFILL_DAYS * 86400))
+    now = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
+    q = urllib.parse.urlencode({"filter_entity_id": ",".join(sorted(watch)), "end_time": now})
+    rows = json.loads(ha("GET", f"/history/period/{urllib.parse.quote(since)}?{q}").decode() or "[]")
+    t0 = _ts(since)
+    evs = []
+    for series in rows or []:
+        for h in series or []:
+            e = h.get("entity_id")
+            if e not in watch or _ts(h.get("last_changed")) <= t0:
+                continue
+            target, kind = watch[e]
+            v = h.get("state")
+            if v not in EV_VALUES[kind]:
+                continue
+            ctx = h.get("context") or {}
+            evs.append({"entity_id": target, "kind": kind, "value": {"on": "open", "off": "closed"}.get(v, v) if kind == "door" else v,
+                        "at": h.get("last_changed"), "ha_user": bool(ctx.get("user_id")), "ctx": (ctx.get("id") or "")[:40]})
+    evs.sort(key=lambda x: _ts(x["at"]))
+    if len(evs) > EVENTS_MAX_PER_SYNC:
+        evs = evs[:EVENTS_MAX_PER_SYNC]
+        return evs, evs[-1]["at"]
+    return evs, now
+
+
+def _ts(v):
+    try:
+        import datetime
+        return datetime.datetime.fromisoformat(str(v).replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return 0.0
 
 
 def act(entity_id, action):
@@ -268,7 +341,18 @@ def bridge():
                         hv = {"version": cfg.get("version"), "location": cfg.get("location_name")}
                     except Exception:
                         pass
-                    j = panel("POST", "doors/ha/sync.php", {"version": VERSION, "ha": hv, "entities": items})
+                    try:
+                        evs, cur = collect_events()
+                    except Exception as e:
+                        evs, cur = [], None
+                        if STATE.get("events_error") != str(e)[:120]:
+                            log("Aviso: no se pudo leer el historial de HA:", str(e)[:160])
+                        STATE["events_error"] = str(e)[:120]
+                    j = panel("POST", "doors/ha/sync.php", {"version": VERSION, "ha": hv, "entities": items, "events": evs})
+                    if cur:
+                        save_cursor(cur)
+                        if evs:
+                            log(f"Historial enviado al Panel: {len(evs)} movimientos")
                     n = (len([x for x in items if x["kind"] == "lock"]), len([x for x in items if x["kind"] == "portal"]))
                     if STATE.get("last_counts") != n:
                         log(f"Enviado al Panel: {n[0]} cerraduras y {n[1]} portales")

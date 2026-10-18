@@ -28,7 +28,7 @@ async function load() {
 
 const isOpen = (x) => x.kind === 'lock' && ['unlocked', 'open', 'opening', 'unlocking'].includes(x.state);
 const isClosed = (x) => x.kind === 'lock' && ['locked', 'locking'].includes(x.state);
-const issue = (x) => x.offline || x.jammed || (x.battery != null && x.battery < 20) || isOpen(x);
+const issue = (x) => x.offline || x.jammed || (x.battery != null && x.battery <= 20) || isOpen(x);
 
 function paint() {
   const d = S.data || {}; const items = d.items || []; const p = d.panel || {};
@@ -36,7 +36,7 @@ function paint() {
   const conn = $('conn'); conn.hidden = !(p.error || d.local_error); conn.textContent = d.local_error || p.error || '';
   const locks = items.filter((x) => x.kind === 'lock');
   $('tiles').replaceChildren(
-    tile('Abiertas', locks.filter(isOpen).length, locks.some(isOpen) ? 'warn' : ''), tile('Batería baja', items.filter((x) => x.battery != null && x.battery < 20).length, items.some((x) => x.battery != null && x.battery < 20) ? 'bad' : ''),
+    tile('Abiertas', locks.filter(isOpen).length, locks.some(isOpen) ? 'warn' : ''), tile('Batería baja', items.filter((x) => x.battery != null && x.battery <= 20).length, items.some((x) => x.battery != null && x.battery <= 20) ? 'bad' : ''),
     tile('Sin conexión', items.filter((x) => x.offline).length, items.some((x) => x.offline) ? 'bad' : ''), tile('Puertas', items.length, ''));
   // agrupar por alojamiento con las relaciones del Panel
   const names = Object.fromEntries((d.properties || []).map((x) => [x.id, x.name])); const links = d.links || {};
@@ -62,7 +62,7 @@ function card(x) {
     h('span', { class: `door__ic${open ? ' is-open' : closed ? ' is-closed' : ''}${x.offline || x.jammed ? ' is-bad' : ''}` }, icon(portal ? 'gate' : open ? 'unlock' : 'lock')),
     h('div', { class: 'door__txt' }, h('strong', {}, x.name), h('small', {}, stateTxt, x.model ? ` · ${x.model}` : ''),
       h('span', { class: 'chips' },
-        x.battery != null ? h('span', { class: `chip${x.battery < 20 ? ' chip--bad' : x.battery < 40 ? ' chip--warn' : ''}` }, icon('battery'), `${x.battery} %`) : null,
+        x.battery != null ? h('span', { class: `chip${x.battery <= 20 ? ' chip--bad' : x.battery <= 40 ? ' chip--warn' : ''}` }, icon('battery'), `${x.battery} %`) : null,
         x.door_open != null ? h('span', { class: `chip${x.door_open ? ' chip--warn' : ''}` }, icon('door'), x.door_open ? 'Puerta abierta' : 'Puerta cerrada') : null,
         x.jammed ? h('span', { class: 'chip chip--bad' }, icon('alert'), 'Atascada') : null)),
     h('div', { class: 'door__acts' },
