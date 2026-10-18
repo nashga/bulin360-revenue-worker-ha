@@ -26,7 +26,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
   const VERSION = '1.2.3';
-  const READER_VERSION = 'ch1.2.3';
+  const READER_VERSION = 'ch1.2.4';
   const AIRBNB_KEY = 'd306zoyjsyarp7ifhu67rjxn52tv0t20'; // clave pública de la web de Airbnb (también se lee de la página)
   const AIRBNB_CAL_HASH = 'bfd57b0552df2e8870f68d5cf501868a0e08417267469f55faefa78aca0234f4'; // respaldo si la página aún no lo ha pedido
   const ENGINES = {
@@ -190,7 +190,11 @@
       if (!opts.length) continue; units += r.units;
       const v = Math.min(...opts.map((o) => o.total)); if (best == null || v < best) best = v;
     }
-    return { total: best, rooms_available: units, rooms_listed: rooms.length, error_code: String(json.error_code ?? ''), error_msg: s(json.error_msg), full: /est[aá\ufffd]+ completo|no hay disponibilidad/i.test(htmlText(json.resultado)) };
+    // 0.6.7 · MisterPlan responde «Cod: 8» tanto a «sin disponibilidad» como a «periodo mínimo de reserva… al menos N noches»: el mínimo es una restricción, no un fallo
+    const all = htmlText(json.resultado) + ' ' + s(json.error_msg);
+    const mn = all.match(/(?:per[ií\ufffd]+odo|estancia)\s+m[ií\ufffd]+nim[oa][\s\S]{0,120}?(\d{1,2})\s*noches/i) || all.match(/al menos\s+(\d{1,2})\s*noches|m[ií\ufffd]+nimo\s+(?:de\s+)?(\d{1,2})\s*noches/i);
+    const minNights = mn ? Number(mn[1] || mn[2]) : null;
+    return { total: best, rooms_available: units, rooms_listed: rooms.length, error_code: String(json.error_code ?? ''), error_msg: s(json.error_msg), min_nights: minNights, full: /est[aá\ufffd]+ completo|no hay disponibilidad/i.test(htmlText(json.resultado)) };
   }
   /** Página de Avaibook (nueva_reserva.php) → total o sin disponibilidad. Solo vale la línea «Total» (no depósito, resto ni fianza). */
   function parseAvaibookText(text) {
@@ -531,6 +535,7 @@
     const p = parseMisterplanResult(j, job.guests); if (!p) return result('ESTRUCTURA_CAMBIADA', { reason: 'misterplan_shape', error_detail: j ? 'sin resultado' : 'jsonp_timeout', final_url: env.loc.href });
     const price = priceBase(job, { rooms_available: p.rooms_available });
     if (!p.total && p.rooms_listed) return result('PARCIAL', { reason: 'no_room_for_group', price, final_url: env.loc.href }); // hay habitaciones, ninguna para este grupo
+    if (!p.total && p.min_nights && p.min_nights > nights(job.checkin, job.checkout)) return result('RESTRICCION', { reason: 'min_nights', price: Object.assign(price, { min_nights: p.min_nights }), error_detail: 'Estancia mínima ' + p.min_nights + ' noches', final_url: env.loc.href });
     if (!p.total && !p.full && /^ERROR/i.test(p.error_msg)) return result('ERROR', { reason: 'misterplan_engine_error', error_detail: p.error_msg.slice(0, 200), final_url: env.loc.href });
     if (!p.total) return result('SIN_DISPONIBILIDAD', { reason: 'no_rooms', price, final_url: env.loc.href });
     return result('OK', { price: Object.assign(price, { total: p.total }), final_url: env.loc.href });

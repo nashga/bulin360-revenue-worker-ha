@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.4.12
+- Lector ch1.2.4: MisterPlan responde «Cod: 8» tanto a «sin disponibilidad» como a «periodo mínimo de reserva… al menos N noches». La estancia mínima ya sale como restricción (min_nights, con las noches) y no como fallo del motor (misterplan_engine_error).
+
 ## 0.4.11
 - Lector ch1.2.3: si Airbnb o VRBO dicen que el anuncio ya no existe («Hemos eliminado la página que buscas»), la lectura sale como «listing_removed» y el Panel (≥ 0.42.5) desactiva el anuncio a la segunda vez.
 
