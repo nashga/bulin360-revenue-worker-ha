@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.13
+- Lector ch1.2.5: estancia mínima en Avaibook («este alojamiento exige: Estancia mínima de N noches») y Avirato («Estancia mínima de N noche(s) en todo el establecimiento») sale como restricción (min_nights) y no como avaibook_total_not_found / avirato_rooms_not_found.
+- Avaibook: «Fechas no disponibles» cuenta como sin disponibilidad. Avirato añade la pista de la página cuando no encuentra nada.
+
 ## 0.4.12
 - Lector ch1.2.4: MisterPlan responde «Cod: 8» tanto a «sin disponibilidad» como a «periodo mínimo de reserva… al menos N noches». La estancia mínima ya sale como restricción (min_nights, con las noches) y no como fallo del motor (misterplan_engine_error).
 

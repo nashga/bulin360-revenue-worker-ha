@@ -26,7 +26,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
   const VERSION = '1.2.3';
-  const READER_VERSION = 'ch1.2.4';
+  const READER_VERSION = 'ch1.2.5';
   const AIRBNB_KEY = 'd306zoyjsyarp7ifhu67rjxn52tv0t20'; // clave pública de la web de Airbnb (también se lee de la página)
   const AIRBNB_CAL_HASH = 'bfd57b0552df2e8870f68d5cf501868a0e08417267469f55faefa78aca0234f4'; // respaldo si la página aún no lo ha pedido
   const ENGINES = {
@@ -141,6 +141,10 @@
   }
   function parseAviratoText(text) {
     const t = String(text || '');
+    // ch1.2.5 · «Restricciones de reserva: Estancia mínima de 3 noche(s) en todo el establecimiento» / «Es necesaria una estancia mínima de 3 noche(s) para las fechas seleccionadas».
+    // La página deja a la vista «Buscando…/Actualizando disponibilidad…» aunque haya terminado, así que se mira antes que la carga.
+    const mn = !/€/.test(t) && (t.match(/estancia m[ií]nima de\s*(\d{1,2})\s*noche\(?s?\)?\s*en todo el establecimiento/i) || t.match(/necesaria una estancia m[ií]nima de\s*(\d{1,2})\s*noche/i));
+    if (mn) return { restriction: true, min_nights: Number(mn[1]) };
     if (/buscando\.\.\.|actualizando disponibilidad/i.test(t) && !/€/.test(t)) return { loading: true };
     const tot = totalsInText(t); const rooms = (t.match(/Habitaciones\s*\n\s*(\d+)/) || [])[1];
     if (tot.length) return { total: Math.min(...tot), rooms_available: rooms != null ? Number(rooms) : null };
@@ -199,13 +203,16 @@
   /** Página de Avaibook (nueva_reserva.php) → total o sin disponibilidad. Solo vale la línea «Total» (no depósito, resto ni fianza). */
   function parseAvaibookText(text) {
     const t = String(text || '');
-    if (/no hay disponibilidad para las fechas|no availability for the selected dates|alojamiento no est[aá] disponible/i.test(t)) return { unavailable: true };
+    if (/no hay disponibilidad para las fechas|no availability for the selected dates|alojamiento no est[aá] disponible|fechas no disponibles|dates not available/i.test(t)) return { unavailable: true };
     const lines = t.split(/\n+/).map(s).filter(Boolean);
     for (let i = 0; i < lines.length; i++) {
       if (/^total\b/i.test(lines[i]) && !/dep[oó]sito|resto|fianza|pagar ahora|a pagar/i.test(lines[i])) {
         const v = parseEuroAmount(lines[i]) ?? (lines[i + 1] ? parseEuroAmount(lines[i + 1]) : null); if (v) return { total: v };
       }
     }
+    // ch1.2.5 · «Durante la temporada del 21-Dic-2026 al 24-Dic-2026, este alojamiento exige: Estancia mínima de 3 noches» (sin total ni aviso de disponibilidad)
+    const mn = t.match(/exige:?[\s\S]{0,40}?estancia m[ií]nima de\s*(\d{1,2})\s*noches/i) || t.match(/minimum stay of\s*(\d{1,2})\s*nights/i);
+    if (mn) return { min_nights: Number(mn[1]) };
     return {};
   }
   /**
@@ -487,9 +494,10 @@
   }
   async function aviratoPrice(job, env) {
     const p = qp(env); if (p.get('startDate') !== job.checkin || p.get('endDate') !== job.checkout || Number(p.get('adults')) !== Number(job.guests)) return result('INCONSISTENTE', { reason: 'context_mismatch', error_detail: 'url_params' });
-    const read = await waitFor(env, () => { const r = parseAviratoText(bodyText(env)); return r.total || r.unavailable ? r : null; }, 25000, 800);
+    const read = await waitFor(env, () => { const r = parseAviratoText(bodyText(env)); return r.total || r.unavailable || r.restriction ? r : null; }, 25000, 800);
     const price = { checkin: job.checkin, checkout: job.checkout, guests: job.guests, currency: 'EUR' };
-    if (!read) return result('ESTRUCTURA_CAMBIADA', { reason: 'avirato_rooms_not_found', final_url: env.loc.href });
+    if (!read) return result('ESTRUCTURA_CAMBIADA', { reason: 'avirato_rooms_not_found', error_detail: pageHint(env), final_url: env.loc.href });
+    if (read.restriction) return result('RESTRICCION', { reason: 'min_nights', price: Object.assign(price, { min_nights: read.min_nights }), error_detail: 'Estancia mínima ' + read.min_nights + ' noches', final_url: env.loc.href });
     if (read.unavailable) return result('SIN_DISPONIBILIDAD', { reason: 'no_rooms', price: Object.assign(price, { rooms_available: 0 }), final_url: env.loc.href });
     return result('OK', { price: Object.assign(price, { total: read.total, rooms_available: read.rooms_available }), final_url: env.loc.href });
   }
@@ -542,8 +550,12 @@
   }
   async function avaibookPrice(job, env) {
     const p = qp(env); if (p.get('f_ini') !== job.checkin || p.get('f_fin') !== job.checkout || Number(p.get('capacidad')) !== Number(job.guests)) return result('INCONSISTENTE', { reason: 'context_mismatch', error_detail: 'url_params' });
-    const read = await waitFor(env, () => { const r = parseAvaibookText(bodyText(env)); if (r.total || r.unavailable) return r; const m = parseAvaibookRooms(bodyText(env), job.guests); return m ? { rooms: m } : null; }, 25000, 800);
+    const n = nights(job.checkin, job.checkout); const t0 = env.now(); let minSeen = null;
+    const read = await waitFor(env, () => { const r = parseAvaibookText(bodyText(env)); if (r.total || r.unavailable) return r; const m = parseAvaibookRooms(bodyText(env), job.guests); if (m) return { rooms: m };
+      if (r.min_nights && r.min_nights > n) { minSeen = r.min_nights; if (env.now() - t0 > 4000) return { restriction: true, min_nights: r.min_nights }; } return null; }, 25000, 800); // espera unos segundos por si luego pinta el total
+    if (!read && minSeen) return result('RESTRICCION', { reason: 'min_nights', price: priceBase(job, { min_nights: minSeen }), error_detail: 'Estancia mínima ' + minSeen + ' noches', final_url: env.loc.href });
     if (!read) return result('ESTRUCTURA_CAMBIADA', { reason: 'avaibook_total_not_found', error_detail: pageHint(env), final_url: env.loc.href });
+    if (read.restriction) return result('RESTRICCION', { reason: 'min_nights', price: priceBase(job, { min_nights: read.min_nights }), error_detail: 'Estancia mínima ' + read.min_nights + ' noches', final_url: env.loc.href });
     if (read.rooms) { // ch1.2.1 · varias estancias (hotel)
       const m = read.rooms; const price = priceBase(job, { rooms_available: m.rooms_available });
       if (!m.total && !m.rooms_fit) return result('PARCIAL', { reason: 'no_room_for_group', price, final_url: env.loc.href });
